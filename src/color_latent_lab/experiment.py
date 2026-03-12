@@ -1247,7 +1247,7 @@ def run_color_format_latent_experiment(
                 last_positions = _non_padding_last_positions(encoded_device["attention_mask"])
                 batch_layer_arrays: dict[int, Any] = {}
                 for layer in selected_layers:
-                    hidden_state = outputs.hidden_states[layer].detach().cpu()
+                    hidden_state = outputs.hidden_states[layer].detach().float().cpu()
                     batch_layer_array = np.stack(
                         [
                             hidden_state[row_index, last_position, :].numpy().astype(np.float32)

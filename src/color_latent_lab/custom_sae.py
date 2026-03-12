@@ -221,6 +221,7 @@ def _capture_layer_activations(
             cached_vectors.append(
                 hidden_states[layer][batch_index, last_positions[batch_index]]
                 .detach()
+                .float()
                 .cpu()
                 .numpy()
                 .astype(np.float32)
