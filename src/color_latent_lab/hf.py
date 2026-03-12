@@ -31,6 +31,7 @@ def get_tokenizer(model_name: str) -> Any:
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token or tokenizer.unk_token
+    tokenizer.padding_side = "left"
     return tokenizer
 
 
