@@ -227,6 +227,11 @@ def _lookup_first(config: dict[str, Any], keys: tuple[str, ...]) -> Any:
     for key in keys:
         if key in config:
             return config[key]
+    for value in config.values():
+        if isinstance(value, dict):
+            nested = _lookup_first(value, keys)
+            if nested is not None:
+                return nested
     return None
 
 
@@ -243,17 +248,13 @@ def _infer_sae_dimensions(config: dict[str, Any], state_dict: dict[str, Any]) ->
     if decoder_weight is None:
         decoder_weight = state_dict.get("W_dec")
     if input_dim is None and encoder_weight is not None:
-        shape = tuple(int(value) for value in encoder_weight.shape)
-        input_dim = shape[1] if shape[0] <= shape[1] else shape[0]
+        input_dim = int(encoder_weight.shape[1])
     if dictionary_size is None and encoder_weight is not None:
-        shape = tuple(int(value) for value in encoder_weight.shape)
-        dictionary_size = shape[0] if shape[0] <= shape[1] else shape[1]
+        dictionary_size = int(encoder_weight.shape[0])
     if input_dim is None and decoder_weight is not None:
-        shape = tuple(int(value) for value in decoder_weight.shape)
-        input_dim = min(shape)
+        input_dim = int(decoder_weight.shape[0])
     if dictionary_size is None and decoder_weight is not None:
-        shape = tuple(int(value) for value in decoder_weight.shape)
-        dictionary_size = max(shape)
+        dictionary_size = int(decoder_weight.shape[1])
     if input_dim is None or dictionary_size is None:
         raise RuntimeError("Could not infer SAE input_dim / dictionary_size from checkpoint.")
     return int(input_dim), int(dictionary_size)

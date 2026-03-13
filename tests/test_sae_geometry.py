@@ -245,6 +245,48 @@ def test_load_off_the_shelf_sae_from_local_checkpoint_root(tmp_path: Path) -> No
     assert config["repo_id_or_path"] == str(repo_root)
 
 
+def test_load_off_the_shelf_sae_reads_nested_config_and_hf_tensor_shapes(tmp_path: Path) -> None:
+    repo_root = tmp_path / "fake_sae_repo"
+    layer_dir = repo_root / "resid_post_layer_0" / "trainer_0"
+    layer_dir.mkdir(parents=True, exist_ok=True)
+    model = custom_sae.SparseAutoencoder(input_dim=5, dictionary_size=7, top_k=3)
+    payload = {
+        "state_dict": model.state_dict(),
+        "config": {
+            "trainer": {
+                "activation_dim": 5,
+                "dict_size": 7,
+                "k": 3,
+            }
+        },
+    }
+    torch.save(payload, layer_dir / "ae.pt")
+    (layer_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "trainer": {
+                    "activation_dim": 5,
+                    "dict_size": 7,
+                    "k": 3,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded_model, config = sae_geometry.load_off_the_shelf_sae(
+        layer=0,
+        repo_id_or_path=str(repo_root),
+        trainer_index=0,
+        device="cpu",
+    )
+
+    assert loaded_model.input_dim == 5
+    assert loaded_model.dictionary_size == 7
+    assert loaded_model.top_k == 3
+    assert config["top_k"] == 3
+
+
 def test_run_color_sae_geometry_experiment_writes_layer_outputs(
     tmp_path: Path,
     monkeypatch,
