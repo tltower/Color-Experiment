@@ -388,6 +388,46 @@ def test_run_color_sae_geometry_can_skip_silhouette(
     assert layer_summary["format_silhouette"] is None
 
 
+def test_run_color_sae_geometry_uses_raw_prompt_without_chat_wrapper(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _install_fake_geometry_components(monkeypatch)
+    monkeypatch.setattr(sae_geometry, "CORE_COLOR_FAMILIES", ("red", "blue", "green"))
+    monkeypatch.setattr(
+        sae_geometry,
+        "CORE_COLOR_HEX",
+        {"red": "#ff0000", "blue": "#0000ff", "green": "#00ff00"},
+    )
+    monkeypatch.setattr(
+        sae_geometry,
+        "CORE_COLOR_RGB",
+        {"red": "255,0,0", "blue": "0,0,255", "green": "0,255,0"},
+    )
+    monkeypatch.setattr(
+        sae_geometry,
+        "_render_prompt",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("geometry should use raw prompts")),
+    )
+    repo_root = tmp_path / "fake_sae_repo"
+    _write_fake_sae_repo(repo_root, layers=(0,))
+    word_list_path = tmp_path / "colors.txt"
+    word_list_path.write_text("red\nscarlet\nblue\ngreen\n", encoding="utf-8")
+
+    sae_geometry.run_color_sae_geometry_experiment(
+        output_dir=tmp_path / "geometry",
+        model_name="Qwen/Qwen2.5-7B-Instruct",
+        sae_repo_id_or_path=str(repo_root),
+        sae_layers=(0,),
+        trainer_index=0,
+        word_list_path=word_list_path,
+        batch_size=4,
+        encode_batch_size=4,
+        max_length=32,
+        device="cpu",
+    )
+
+
 def test_run_color_sae_geometry_resume_skips_completed_capture_and_layers(
     tmp_path: Path,
     monkeypatch,

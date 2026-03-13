@@ -386,7 +386,10 @@ def _capture_last_token_activations(
     runtime_device = _resolve_device(torch, device)
     model.to(runtime_device)
     model.eval()
-    prompts = [_render_prompt(tokenizer, str(record["prompt"])) for record in records]
+    # Geometry runs intentionally analyze the raw `Color: X` prompt so the last
+    # non-padding token stays attached to the color value instead of a
+    # chat-template assistant preamble.
+    prompts = [str(record["prompt"]) for record in records]
     layer_vectors: dict[int, list[Any]] = {layer: [] for layer in layers}
     enriched_rows: list[dict[str, Any]] = []
     total_batches = math.ceil(len(records) / batch_size)
