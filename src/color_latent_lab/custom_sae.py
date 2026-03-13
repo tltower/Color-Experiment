@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,56 +25,34 @@ from .experiment import (
     _write_jsonl,
 )
 from .hf import create_generation_components
-from .word_lists import default_words
-
-SYSTEM_WORD_LIST_CANDIDATES = (
-    Path("/usr/share/dict/words"),
-    Path("/usr/dict/words"),
-    Path("/usr/share/dict/web2"),
-)
+from .word_lists import default_words, find_system_word_list, preset_words, read_word_file
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-
-def _normalize_word(raw_word: str) -> str | None:
-    stripped = raw_word.strip().lower()
-    if not stripped:
-        return None
-    if not stripped.isascii() or not stripped.isalpha():
-        return None
-    if len(stripped) < 3 or len(stripped) > 16:
-        return None
-    return stripped
-
-
 def load_training_words(
     *,
     word_list_path: Path | None,
+    word_preset: str,
     limit: int,
 ) -> list[str]:
     if word_list_path is None:
-        source_path = next((path for path in SYSTEM_WORD_LIST_CANDIDATES if path.exists()), None)
+        if word_preset == "color_words":
+            return preset_words("color_words", limit=limit)
+        source_path = find_system_word_list()
         if source_path is None:
-            if limit <= 200:
-                return default_words(limit=limit)
+            default_seed = default_words()
+            if limit <= len(default_seed):
+                return preset_words(word_preset, limit=limit)
             raise RuntimeError(
-                "No system word list found. Pass `--word-list-path` with one word per line."
+                f"Requested {limit} words, but only {len(default_seed)} built-in words are available. "
+                "Pass `--word-list-path` or install a system dictionary."
             )
     else:
         source_path = word_list_path
 
-    words: list[str] = []
-    seen: set[str] = set()
-    for line in source_path.read_text(encoding="utf-8").splitlines():
-        normalized = _normalize_word(line)
-        if normalized is None or normalized in seen:
-            continue
-        seen.add(normalized)
-        words.append(normalized)
-        if len(words) >= limit:
-            break
+    words = read_word_file(source_path, limit=limit)
     if not words:
         raise ValueError(f"No valid words loaded from {source_path}")
     return words
@@ -345,6 +324,7 @@ def _write_analysis_final_results(output_dir: Path, *, summary: dict[str, Any]) 
             "family_rankings": "family_rankings.json",
             "feature_examples": "feature_examples.jsonl",
             "heartbeat_status": "heartbeat_status.json",
+            "schema_label_rankings": "schema_label_rankings.json",
             "summary": "summary.json",
         },
         "summary": summary,
@@ -360,6 +340,7 @@ def run_color_sae_training(
     prompt_format: str = "hex",
     prompt_template: str | None = None,
     word_list_path: Path | None = None,
+    word_preset: str = "default",
     limit: int = 10000,
     max_length: int = 256,
     activation_batch_size: int = 32,
@@ -402,10 +383,11 @@ def run_color_sae_training(
         train_batch_size=train_batch_size,
         validation_fraction=validation_fraction,
         word_list_path=None if word_list_path is None else str(word_list_path),
+        word_preset=word_preset,
     )
     phase = "setup"
     try:
-        words = load_training_words(word_list_path=word_list_path, limit=limit)
+        words = load_training_words(word_list_path=word_list_path, word_preset=word_preset, limit=limit)
         (output_dir / "words.txt").write_text("\n".join(words) + "\n", encoding="utf-8")
         runtime_device = _resolve_device(torch, device)
         config = {
@@ -424,6 +406,7 @@ def run_color_sae_training(
             "top_k": top_k,
             "validation_fraction": validation_fraction,
             "word_count": len(words),
+            "word_preset": word_preset,
         }
         paths = _checkpoint_paths(output_dir)
         if resume and paths["state"].exists():
@@ -626,6 +609,7 @@ def run_color_sae_training(
             "train_metrics": final_train_metrics,
             "validation_metrics": final_validation_metrics,
             "word_count": len(words),
+            "word_preset": word_preset,
         }
         _write_json(output_dir / "summary.json", summary)
         _write_training_final_results(output_dir, summary=summary)
@@ -742,6 +726,11 @@ def _one_vs_rest_family_probe(
     )
 
 
+def _sanitize_label_for_filename(label: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+    return cleaned or "label"
+
+
 def _load_run_vectors(
     *,
     color_run_dir: Path,
@@ -853,6 +842,29 @@ def run_color_sae_feature_analysis(
             np.save(family_directions_dir / f"{family}_decoder_direction.npy", direction)
         _write_json(output_dir / "family_rankings.json", family_rankings)
 
+        schema_label_rankings: dict[str, Any] = {}
+        if format_name != "all":
+            schema_labels = [str(row["normalized_output"]) for row in valid_rows]
+            schema_directions_dir = output_dir / "schema_decoder_directions"
+            schema_directions_dir.mkdir(parents=True, exist_ok=True)
+            for schema_label, count in sorted(Counter(schema_labels).items()):
+                if count < 4:
+                    continue
+                summary, direction = _one_vs_rest_family_probe(
+                    model=model,
+                    feature_matrix=encoded_features,
+                    labels=schema_labels,
+                    family=schema_label,
+                )
+                if summary is None or direction is None:
+                    continue
+                schema_label_rankings[schema_label] = summary
+                np.save(
+                    schema_directions_dir / f"{_sanitize_label_for_filename(schema_label)}_decoder_direction.npy",
+                    direction,
+                )
+        _write_json(output_dir / "schema_label_rankings.json", schema_label_rankings)
+
         feature_rows = []
         for row_index, row in enumerate(valid_rows):
             feature_rows.append(
@@ -880,6 +892,7 @@ def run_color_sae_feature_analysis(
             "layer": layer,
             "red_blue": red_blue_summary,
             "sae_checkpoint_path": str(sae_checkpoint_path),
+            "schema_label_rankings": schema_label_rankings,
             "warm_cool": warm_cool_summary,
         }
         _write_json(output_dir / "summary.json", summary)
@@ -890,6 +903,7 @@ def run_color_sae_feature_analysis(
             state="completed",
             activation_count=int(encoded_features.shape[0]),
             family_count=len(family_rankings),
+            schema_label_count=len(schema_label_rankings),
         )
         return summary
     except Exception as error:

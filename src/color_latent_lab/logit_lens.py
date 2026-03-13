@@ -744,7 +744,8 @@ def run_color_logit_lens_experiment(
     output_dir: Path,
     model_name: str,
     word_list_path: Path | None = None,
-    limit: int | None = 200,
+    word_preset: str = "default",
+    limit: int | None = 1000,
     formats: tuple[str, ...] = exp.DEFAULT_FORMATS,
     layers: tuple[int, ...] | None = None,
     max_length: int = 96,
@@ -754,7 +755,7 @@ def run_color_logit_lens_experiment(
     resume: bool = False,
     device: str = "auto",
 ) -> dict[str, Any]:
-    np, torch, _PCA, _LogisticRegression, _StratifiedKFold = exp._require_stack()
+    np, torch, _PCA, _LogisticRegression, _KFold = exp._require_stack()
     output_dir.mkdir(parents=True, exist_ok=True)
     heartbeat = exp.HeartbeatRecorder(output_dir, label="logit-lens")
     heartbeat.write_manifest(
@@ -770,11 +771,12 @@ def run_color_logit_lens_experiment(
         resume=resume,
         top_token_count=top_token_count,
         word_list_path=None if word_list_path is None else str(word_list_path),
+        word_preset=word_preset,
     )
     phase = "setup"
     try:
         heartbeat.update(phase=phase, message="Loading word list")
-        words, word_source = exp._read_words(word_list_path, limit)
+        words, word_source = exp._read_words(word_list_path, limit, word_preset=word_preset)
         state = exp._ensure_checkpoint_state(
             output_dir=output_dir,
             name="logit_lens",
@@ -789,6 +791,7 @@ def run_color_logit_lens_experiment(
                 "top_token_count": top_token_count,
                 "word_count": len(words),
                 "word_hash": exp._hash_words(words),
+                "word_preset": word_preset,
             },
             resume=resume,
         )
@@ -1037,6 +1040,7 @@ def run_color_logit_lens_experiment(
             "semantic_to_rendering_gap_by_format": interpretation["semantic_to_rendering_gap_by_format"],
             "top_token_count": top_token_count,
             "word_count": len(words),
+            "word_preset": word_preset,
             "word_source": word_source,
         }
         exp._write_json(output_dir / "summary.json", summary)

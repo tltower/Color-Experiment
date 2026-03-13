@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 COMMON_NOUNS_200: tuple[str, ...] = (
     "apple",
     "arrow",
@@ -203,9 +205,355 @@ COMMON_NOUNS_200: tuple[str, ...] = (
     "wood",
 )
 
+COMMON_NOUNS_EXTRA: tuple[str, ...] = (
+    "acorn",
+    "airplane",
+    "almond",
+    "anchor",
+    "ant",
+    "apricot",
+    "apron",
+    "armor",
+    "asphalt",
+    "avocado",
+    "badge",
+    "badger",
+    "balloon",
+    "banana",
+    "barrel",
+    "beacon",
+    "beaver",
+    "beetle",
+    "bicycle",
+    "biscuit",
+    "blackberry",
+    "blueberry",
+    "bracelet",
+    "brass",
+    "broom",
+    "cabbage",
+    "cactus",
+    "camera",
+    "camel",
+    "canary",
+    "cannon",
+    "canoe",
+    "cardboard",
+    "cart",
+    "carton",
+    "cauliflower",
+    "celery",
+    "chain",
+    "charcoal",
+    "chestnut",
+    "chimney",
+    "cinnamon",
+    "citrine",
+    "clock",
+    "coin",
+    "compass",
+    "cookie",
+    "crab",
+    "cricket",
+    "crowbar",
+    "dagger",
+    "daffodil",
+    "deer",
+    "denim",
+    "desk",
+    "dish",
+    "dog",
+    "donkey",
+    "dragonfly",
+    "drawer",
+    "duck",
+    "egg",
+    "engine",
+    "falcon",
+    "fan",
+    "fence",
+    "fig",
+    "finch",
+    "flag",
+    "flute",
+    "fork",
+    "furnace",
+    "garlic",
+    "gecko",
+    "gem",
+    "ginger",
+    "glacier",
+    "goose",
+    "gravel",
+    "grill",
+    "helmet",
+    "heron",
+    "highway",
+    "hook",
+    "horn",
+    "igloo",
+    "iron",
+    "ivy",
+    "jacket",
+    "jar",
+    "jasmine",
+    "jigsaw",
+    "kangaroo",
+    "kiln",
+    "koala",
+    "ladder",
+    "lamp",
+    "lavender",
+    "leather",
+    "lettuce",
+    "lighthouse",
+    "lily",
+    "lizard",
+    "lobster",
+    "locket",
+    "machine",
+    "magnet",
+    "mango",
+    "maple",
+    "marble",
+    "marsh",
+    "mask",
+    "meteor",
+    "mint",
+    "motor",
+    "moth",
+    "mulberry",
+    "necklace",
+    "needle",
+    "nectarine",
+    "nickel",
+    "noodle",
+    "oak",
+    "obsidian",
+    "onion",
+    "opal",
+    "orchid",
+    "otter",
+    "oyster",
+    "palm",
+    "panther",
+    "parchment",
+    "parrot",
+    "parsley",
+    "peanut",
+    "pebble",
+    "pencil",
+    "penguin",
+    "phoenix",
+    "piano",
+    "pillow",
+    "pistol",
+    "plaster",
+    "plastic",
+    "pomegranate",
+    "popcorn",
+    "porcelain",
+    "potato",
+    "pottery",
+    "pumpkin",
+    "puppy",
+    "quartz",
+    "quiver",
+    "rabbit",
+    "raccoon",
+    "radish",
+    "railroad",
+    "raspberry",
+    "relic",
+    "rhino",
+    "ribbon",
+    "robe",
+    "rocket",
+    "rope",
+    "saffron",
+    "sail",
+    "salmon",
+    "sandal",
+    "sapphire",
+    "scarf",
+    "scooter",
+    "screwdriver",
+    "seed",
+    "seashell",
+    "shark",
+    "sheep",
+    "shovel",
+    "shrimp",
+    "sidewalk",
+    "silk",
+    "skillet",
+    "skull",
+    "slate",
+    "snail",
+    "snake",
+    "socket",
+    "soybean",
+    "spinach",
+    "spoon",
+    "squirrel",
+    "statue",
+    "steel",
+    "stingray",
+    "suitcase",
+    "sulfur",
+    "sweater",
+    "tapestry",
+    "telescope",
+    "thistle",
+    "thread",
+    "tile",
+    "tulip",
+    "tunnel",
+    "turmeric",
+    "turtle",
+    "twig",
+    "umbrella",
+    "vase",
+    "vineyard",
+    "violin",
+    "vulture",
+    "wagon",
+    "walnut",
+    "warehouse",
+    "wasp",
+    "wheel",
+    "wisteria",
+    "yarn",
+    "zebra",
+)
+
+COLOR_WORDS: tuple[str, ...] = (
+    "red",
+    "scarlet",
+    "crimson",
+    "carmine",
+    "maroon",
+    "burgundy",
+    "ruby",
+    "vermilion",
+    "coral",
+    "salmon",
+    "rose",
+    "pink",
+    "magenta",
+    "fuchsia",
+    "purple",
+    "violet",
+    "lilac",
+    "lavender",
+    "plum",
+    "mauve",
+    "indigo",
+    "blue",
+    "azure",
+    "cobalt",
+    "sapphire",
+    "navy",
+    "teal",
+    "cyan",
+    "turquoise",
+    "aqua",
+    "cerulean",
+    "green",
+    "emerald",
+    "jade",
+    "olive",
+    "lime",
+    "mint",
+    "chartreuse",
+    "yellow",
+    "gold",
+    "amber",
+    "lemon",
+    "saffron",
+    "orange",
+    "tangerine",
+    "apricot",
+    "peach",
+    "brown",
+    "umber",
+    "sienna",
+    "tan",
+    "beige",
+    "bronze",
+    "copper",
+    "black",
+    "charcoal",
+    "ebony",
+    "white",
+    "ivory",
+    "gray",
+    "grey",
+    "silver",
+)
+
+WORD_PRESET_NAMES: tuple[str, ...] = ("default", "color_words")
+
+
+SYSTEM_WORD_LIST_CANDIDATES: tuple[Path, ...] = (
+    Path("/usr/share/dict/words"),
+    Path("/usr/share/dict/american-english"),
+    Path("/usr/share/dict/british-english"),
+    Path("/usr/dict/words"),
+    Path("/usr/share/dict/web2"),
+)
+
+
+def normalize_word(raw_word: str, *, min_length: int = 3, max_length: int = 16) -> str | None:
+    stripped = raw_word.strip().lower()
+    if not stripped:
+        return None
+    if not stripped.isascii() or not stripped.isalpha():
+        return None
+    if len(stripped) < min_length or len(stripped) > max_length:
+        return None
+    return stripped
+
+
+def find_system_word_list() -> Path | None:
+    return next((path for path in SYSTEM_WORD_LIST_CANDIDATES if path.exists()), None)
+
+
+def read_word_file(path: Path, *, limit: int | None = None) -> list[str]:
+    words: list[str] = []
+    seen: set[str] = set()
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        normalized = normalize_word(line)
+        if normalized is None or normalized in seen:
+            continue
+        seen.add(normalized)
+        words.append(normalized)
+        if limit is not None and len(words) >= limit:
+            break
+    return words
+
 
 def default_words(limit: int | None = None) -> list[str]:
-    words = list(COMMON_NOUNS_200)
+    words = list(COMMON_NOUNS_200 + COMMON_NOUNS_EXTRA)
     if limit is None:
         return words
     return words[:limit]
+
+
+def color_words(limit: int | None = None) -> list[str]:
+    words = list(COLOR_WORDS)
+    if limit is None:
+        return words
+    return words[:limit]
+
+
+def preset_words(word_preset: str, *, limit: int | None = None) -> list[str]:
+    if word_preset == "default":
+        return default_words(limit=limit)
+    if word_preset == "color_words":
+        return color_words(limit=limit)
+    raise ValueError(f"Unsupported word preset {word_preset!r}")
+
+
+def bundled_color_word_list_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "word_lists" / "english_color_words.txt"

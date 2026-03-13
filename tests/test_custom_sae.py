@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,19 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from color_latent_lab import custom_sae
+
+
+def test_load_training_words_raises_for_large_limit_without_dictionary(monkeypatch) -> None:
+    monkeypatch.setattr(custom_sae, "find_system_word_list", lambda: None)
+
+    with pytest.raises(RuntimeError, match="Requested .* built-in words are available"):
+        custom_sae.load_training_words(word_list_path=None, word_preset="default", limit=5000)
+
+
+def test_load_training_words_uses_color_word_preset() -> None:
+    words = custom_sae.load_training_words(word_list_path=None, word_preset="color_words", limit=5)
+
+    assert words == ["red", "scarlet", "crimson", "carmine", "maroon"]
 
 
 class FakeTokenizer:
@@ -214,6 +228,7 @@ def test_run_color_sae_feature_analysis_writes_family_rankings_and_directions(
     assert "blue" in summary["family_rankings"]
     assert (output_dir / "encoded_features.npy").exists()
     assert (output_dir / "family_rankings.json").exists()
+    assert (output_dir / "schema_label_rankings.json").exists()
     assert (output_dir / "warm_cool_decoder_direction.npy").exists()
     assert (output_dir / "red_blue_decoder_direction.npy").exists()
     assert (output_dir / "family_decoder_directions" / "red_decoder_direction.npy").exists()

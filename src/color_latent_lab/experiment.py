@@ -19,10 +19,17 @@ from pathlib import Path
 from typing import Any
 
 from .hf import create_generation_components
-from .word_lists import default_words
+from .word_lists import (
+    WORD_PRESET_NAMES,
+    bundled_color_word_list_path,
+    default_words,
+    find_system_word_list,
+    preset_words,
+    read_word_file,
+)
 
 FORMAT_PROMPTS: dict[str, str] = {
-    "word": "What color do you associate with the word {word}? Reply with one basic color word.",
+    "word": "What color do you associate with the word {word}? Reply with one color word.",
     "hex": "What color do you associate with the word {word}? Reply with a hex code.",
     "rgb": "What color do you associate with the word {word}? Reply with an RGB triplet like 255,0,0.",
 }
@@ -82,12 +89,12 @@ def _require_stack() -> tuple[Any, Any, Any, Any, Any]:
         import torch  # type: ignore[import-not-found]
         from sklearn.decomposition import PCA  # type: ignore[import-not-found]
         from sklearn.linear_model import LogisticRegression  # type: ignore[import-not-found]
-        from sklearn.model_selection import StratifiedKFold  # type: ignore[import-not-found]
+        from sklearn.model_selection import KFold  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError(
             "The research stack is not installed. Use `pip install -e .` in the repo environment."
         ) from exc
-    return np, torch, PCA, LogisticRegression, StratifiedKFold
+    return np, torch, PCA, LogisticRegression, KFold
 
 
 def _utc_now() -> str:
@@ -364,7 +371,7 @@ def parse_format_completion(format_name: str, raw_completion: str) -> ParsedComp
             family = COLOR_WORD_SYNONYMS.get(token)
             if family is not None:
                 return ParsedCompletion(
-                    normalized_output=family,
+                    normalized_output=token,
                     color_family=family,
                     temperature=_temperature_from_family(family),
                 )
@@ -467,43 +474,35 @@ def _parse_layers(text: str | None) -> tuple[int, ...] | None:
     return tuple(values)
 
 
-def _read_words(word_list_path: Path | None, limit: int | None) -> tuple[list[str], str]:
+def _read_words(
+    word_list_path: Path | None,
+    limit: int | None,
+    *,
+    word_preset: str = "default",
+) -> tuple[list[str], str]:
     if word_list_path is not None:
         source = str(word_list_path)
-        rows = word_list_path.read_text(encoding="utf-8").splitlines()
-        words = [row.strip().lower() for row in rows if row.strip()]
+        words = read_word_file(word_list_path, limit=limit)
+    elif word_preset == "color_words":
+        source = "color_words"
+        words = preset_words("color_words", limit=limit)
     else:
         default_seed = default_words()
-        if limit is not None and limit > len(default_seed):
-            system_dictionary = Path("/usr/share/dict/words")
-            if system_dictionary.exists():
-                source = str(system_dictionary)
-                rows = system_dictionary.read_text(encoding="utf-8", errors="ignore").splitlines()
-                words = [
-                    row.strip().lower()
-                    for row in rows
-                    if row.strip().isalpha() and row.strip().isascii() and len(row.strip()) > 2
-                ]
-            else:
-                source = "default_words"
-                words = default_seed
+        if limit is None or limit <= len(default_seed):
+            source = word_preset
+            words = preset_words(word_preset, limit=limit)
         else:
-            source = "default_words"
-            words = default_seed
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for word in words:
-        normalized = word.strip().lower()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        deduped.append(normalized)
-    if limit is not None:
-        deduped = deduped[:limit]
-    if not deduped:
+            system_dictionary = find_system_word_list()
+            if system_dictionary is None:
+                raise RuntimeError(
+                    f"Requested {limit} words, but only {len(default_seed)} built-in words are available. "
+                    "Install a system dictionary or pass `--word-list-path`."
+                )
+            source = str(system_dictionary)
+            words = read_word_file(system_dictionary, limit=limit)
+    if not words:
         raise ValueError("Word list resolved to zero words.")
-    return deduped, source
+    return words, source
 
 
 def _projection_bounds(coords: Any) -> tuple[float, float, float, float]:
@@ -715,7 +714,11 @@ def _write_accuracy_curve_svg(path: Path, layer_rows: list[dict[str, Any]]) -> N
     margin = 72.0
     inner_width = width - 2.0 * margin
     inner_height = height - 2.0 * margin
-    rows = [row for row in layer_rows if row.get("within_mean") is not None or row.get("cross_mean") is not None]
+    rows = [
+        row
+        for row in layer_rows
+        if row.get("within_schema_mean") is not None or row.get("cross_format_mean") is not None
+    ]
     if not rows:
         path.write_text("", encoding="utf-8")
         return
@@ -733,7 +736,7 @@ def _write_accuracy_curve_svg(path: Path, layer_rows: list[dict[str, Any]]) -> N
     lines = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{int(width)}" height="{int(height)}" viewBox="0 0 {int(width)} {int(height)}">',
         '<rect width="100%" height="100%" fill="#fbfaf7" />',
-        f'<text x="{margin}" y="34" font-family="Helvetica, Arial, sans-serif" font-size="24" fill="#111111">Probe transfer across layers</text>',
+        f'<text x="{margin}" y="34" font-family="Helvetica, Arial, sans-serif" font-size="24" fill="#111111">Within-schema and cross-format probe accuracy</text>',
         f'<rect x="{margin}" y="{margin}" width="{inner_width}" height="{inner_height}" fill="none" stroke="#bbb5ab" stroke-width="1" />',
     ]
     for guide in [0.2, 0.4, 0.6, 0.8]:
@@ -744,8 +747,16 @@ def _write_accuracy_curve_svg(path: Path, layer_rows: list[dict[str, Any]]) -> N
         lines.append(
             f'<text x="{margin - 36.0}" y="{y + 4.0:.2f}" font-family="Helvetica, Arial, sans-serif" font-size="12" fill="#666666">{guide:.1f}</text>'
         )
-    within_points = [(project_x(float(row["layer"])), project_y(float(row["within_mean"]))) for row in rows if row.get("within_mean") is not None]
-    cross_points = [(project_x(float(row["layer"])), project_y(float(row["cross_mean"]))) for row in rows if row.get("cross_mean") is not None]
+    within_points = [
+        (project_x(float(row["layer"])), project_y(float(row["within_schema_mean"])))
+        for row in rows
+        if row.get("within_schema_mean") is not None
+    ]
+    cross_points = [
+        (project_x(float(row["layer"])), project_y(float(row["cross_format_mean"])))
+        for row in rows
+        if row.get("cross_format_mean") is not None
+    ]
     if len(within_points) >= 2:
         path_data = " ".join(
             f"{'M' if index == 0 else 'L'} {x:.2f} {y:.2f}" for index, (x, y) in enumerate(within_points)
@@ -763,9 +774,9 @@ def _write_accuracy_curve_svg(path: Path, layer_rows: list[dict[str, Any]]) -> N
     lines.extend(
         [
             f'<circle cx="{width - margin - 120.0}" cy="{margin - 26.0}" r="4" fill="#1f6f5f" />',
-            f'<text x="{width - margin - 108.0}" y="{margin - 22.0}" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#333333">within-format mean</text>',
+            f'<text x="{width - margin - 108.0}" y="{margin - 22.0}" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#333333">within-schema exact-output mean</text>',
             f'<circle cx="{width - margin - 120.0}" cy="{margin - 8.0}" r="4" fill="#9b3d7a" />',
-            f'<text x="{width - margin - 108.0}" y="{margin - 4.0}" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#333333">cross-format mean</text>',
+            f'<text x="{width - margin - 108.0}" y="{margin - 4.0}" font-family="Helvetica, Arial, sans-serif" font-size="13" fill="#333333">cross-format family mean</text>',
         ]
     )
     for row in rows:
@@ -784,11 +795,43 @@ def _mean_or_none(values: list[float]) -> float | None:
     return float(sum(finite) / len(finite))
 
 
+def _fit_probe_accuracy(
+    *,
+    np: Any,
+    LogisticRegression: Any,
+    KFold: Any,
+    source_features: Any,
+    target_features: Any,
+    labels: list[str],
+) -> float | None:
+    if len(labels) < 4:
+        return None
+    label_set = sorted(set(labels))
+    if len(label_set) < 2:
+        return None
+    n_splits = min(5, len(labels))
+    if n_splits < 2:
+        return None
+    label_to_index = {label: index for index, label in enumerate(label_set)}
+    encoded_labels = np.array([label_to_index[label] for label in labels], dtype=np.int64)
+    splitter = KFold(n_splits=n_splits, shuffle=True, random_state=0)
+    scores: list[float] = []
+    for train_indices, test_indices in splitter.split(source_features):
+        train_labels = encoded_labels[train_indices]
+        if len(set(train_labels.tolist())) < 2:
+            continue
+        classifier = LogisticRegression(max_iter=2000)
+        classifier.fit(source_features[train_indices], train_labels)
+        predictions = classifier.predict(target_features[test_indices])
+        scores.append(float((predictions == encoded_labels[test_indices]).mean()))
+    return _mean_or_none(scores)
+
+
 def _fit_transfer_accuracy(
     *,
     np: Any,
     LogisticRegression: Any,
-    StratifiedKFold: Any,
+    KFold: Any,
     source_matrix: Any,
     target_matrix: Any,
     source_rows: list[dict[str, Any]],
@@ -800,25 +843,51 @@ def _fit_transfer_accuracy(
     common_words = [word for word in consensus_by_word if word in source_index and word in target_index]
     if len(common_words) < 4:
         return None
-    label_counts = Counter(consensus_by_word[word] for word in common_words)
-    if len(label_counts) < 2:
-        return None
-    min_class_count = min(label_counts.values())
-    if min_class_count < 2:
-        return None
-    n_splits = min(5, min_class_count)
-    label_to_index = {label: index for index, label in enumerate(sorted(label_counts))}
-    source_features = np.stack([source_matrix[source_index[word]].astype(np.float32) for word in common_words])
-    target_features = np.stack([target_matrix[target_index[word]].astype(np.float32) for word in common_words])
-    labels = np.array([label_to_index[consensus_by_word[word]] for word in common_words], dtype=np.int64)
-    splitter = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
-    scores: list[float] = []
-    for train_indices, test_indices in splitter.split(source_features, labels):
-        classifier = LogisticRegression(max_iter=2000)
-        classifier.fit(source_features[train_indices], labels[train_indices])
-        predictions = classifier.predict(target_features[test_indices])
-        scores.append(float((predictions == labels[test_indices]).mean()))
-    return _mean_or_none(scores)
+    source_features = np.stack(
+        [source_matrix[source_index[word]].astype(np.float32) for word in common_words]
+    )
+    target_features = np.stack(
+        [target_matrix[target_index[word]].astype(np.float32) for word in common_words]
+    )
+    labels = [consensus_by_word[word] for word in common_words]
+    return _fit_probe_accuracy(
+        np=np,
+        LogisticRegression=LogisticRegression,
+        KFold=KFold,
+        source_features=source_features,
+        target_features=target_features,
+        labels=labels,
+    )
+
+
+def _fit_within_schema_accuracy(
+    *,
+    np: Any,
+    LogisticRegression: Any,
+    KFold: Any,
+    matrix: Any,
+    rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    valid_indices = [
+        index for index, row in enumerate(rows) if isinstance(row.get("normalized_output"), str)
+    ]
+    if len(valid_indices) < 4:
+        return {"accuracy": None, "label_count": 0, "sample_count": len(valid_indices)}
+    features = matrix[np.array(valid_indices, dtype=np.int64)].astype(np.float32)
+    labels = [str(rows[index]["normalized_output"]) for index in valid_indices]
+    accuracy = _fit_probe_accuracy(
+        np=np,
+        LogisticRegression=LogisticRegression,
+        KFold=KFold,
+        source_features=features,
+        target_features=features,
+        labels=labels,
+    )
+    return {
+        "accuracy": accuracy,
+        "label_count": len(set(labels)),
+        "sample_count": len(labels),
+    }
 
 
 def _find_transformer_blocks(model: Any) -> Any:
@@ -885,11 +954,12 @@ def _build_layer_analysis(
     np: Any,
     PCA: Any,
     LogisticRegression: Any,
-    StratifiedKFold: Any,
+    KFold: Any,
 ) -> dict[str, Any]:
     hidden_dir = output_dir / "hidden_states"
     points_rows: list[dict[str, Any]] = []
-    transfer_rows: list[dict[str, Any]] = []
+    cross_transfer_rows: list[dict[str, Any]] = []
+    within_schema_rows: list[dict[str, Any]] = []
     grid_specs: list[dict[str, Any]] = []
     layer_summary_rows: list[dict[str, Any]] = []
     for layer_position, layer in enumerate(layers, start=1):
@@ -961,55 +1031,106 @@ def _build_layer_analysis(
 
         within_scores: list[float] = []
         cross_scores: list[float] = []
+        for format_name in formats:
+            within_schema = _fit_within_schema_accuracy(
+                np=np,
+                LogisticRegression=LogisticRegression,
+                KFold=KFold,
+                matrix=layer_matrices[format_name],
+                rows=predictions_by_format[format_name],
+            )
+            within_schema_rows.append(
+                {
+                    "accuracy": within_schema["accuracy"],
+                    "format": format_name,
+                    "label_count": within_schema["label_count"],
+                    "label_mode": "schema_output",
+                    "layer": layer,
+                    "sample_count": within_schema["sample_count"],
+                }
+            )
+            if within_schema["accuracy"] is not None:
+                within_scores.append(float(within_schema["accuracy"]))
         for source_format in formats:
             for target_format in formats:
+                if source_format == target_format:
+                    continue
                 accuracy = _fit_transfer_accuracy(
                     np=np,
                     LogisticRegression=LogisticRegression,
-                    StratifiedKFold=StratifiedKFold,
+                    KFold=KFold,
                     source_matrix=layer_matrices[source_format],
                     target_matrix=layer_matrices[target_format],
                     source_rows=predictions_by_format[source_format],
                     target_rows=predictions_by_format[target_format],
                     consensus_by_word=consensus_by_word,
                 )
-                transfer_rows.append(
+                cross_transfer_rows.append(
                     {
                         "accuracy": accuracy,
                         "layer": layer,
+                        "label_mode": "color_family_consensus",
                         "source_format": source_format,
                         "target_format": target_format,
                     }
                 )
                 if accuracy is None:
                     continue
-                if source_format == target_format:
-                    within_scores.append(accuracy)
-                else:
-                    cross_scores.append(accuracy)
+                cross_scores.append(accuracy)
         layer_summary_rows.append(
             {
-                "cross_mean": _mean_or_none(cross_scores),
+                "cross_format_mean": _mean_or_none(cross_scores),
                 "layer": layer,
-                "within_mean": _mean_or_none(within_scores),
+                "within_schema_mean": _mean_or_none(within_scores),
             }
         )
 
     _write_jsonl(output_dir / "shared_pca_points.jsonl", points_rows)
-    _write_jsonl(output_dir / "probe_transfer.jsonl", transfer_rows)
+    _write_jsonl(output_dir / "cross_format_probe_transfer.jsonl", cross_transfer_rows)
+    _write_jsonl(output_dir / "probe_transfer.jsonl", cross_transfer_rows)
+    _write_jsonl(output_dir / "within_schema_probe_accuracy.jsonl", within_schema_rows)
+    _write_jsonl(output_dir / "layer_summary.jsonl", layer_summary_rows)
     _write_shared_pca_grid_svg(output_dir / "shared_pca_grid.svg", layer_specs=grid_specs, stride=grid_stride)
     _write_accuracy_curve_svg(output_dir / "format_transfer_curve.svg", layer_summary_rows)
 
     best_cross_row = max(
-        (row for row in layer_summary_rows if row.get("cross_mean") is not None),
-        key=lambda row: float(row["cross_mean"]),
+        (row for row in layer_summary_rows if row.get("cross_format_mean") is not None),
+        key=lambda row: float(row["cross_format_mean"]),
         default=None,
     )
+    best_within_schema_rows: dict[str, dict[str, Any]] = {}
+    for format_name in formats:
+        best_row = max(
+            (
+                row
+                for row in within_schema_rows
+                if row["format"] == format_name and row.get("accuracy") is not None
+            ),
+            key=lambda row: float(row["accuracy"]),
+            default=None,
+        )
+        if best_row is not None:
+            best_within_schema_rows[format_name] = best_row
     return {
         "best_cross_layer": None if best_cross_row is None else best_cross_row["layer"],
-        "best_cross_mean_accuracy": None if best_cross_row is None else float(best_cross_row["cross_mean"]),
+        "best_cross_mean_accuracy": None
+        if best_cross_row is None
+        else float(best_cross_row["cross_format_mean"]),
+        "best_within_schema_accuracy_by_format": {
+            format_name: None
+            if format_name not in best_within_schema_rows
+            else float(best_within_schema_rows[format_name]["accuracy"])
+            for format_name in formats
+        },
+        "best_within_schema_layer_by_format": {
+            format_name: None
+            if format_name not in best_within_schema_rows
+            else int(best_within_schema_rows[format_name]["layer"])
+            for format_name in formats
+        },
+        "cross_transfer_rows": cross_transfer_rows,
         "layer_summary_rows": layer_summary_rows,
-        "transfer_rows": transfer_rows,
+        "within_schema_rows": within_schema_rows,
     }
 
 
@@ -1024,11 +1145,13 @@ def _write_run_report(
     consensus_count: int,
     best_cross_layer: int | None,
     best_cross_mean_accuracy: float | None,
+    best_within_schema_accuracy_by_format: dict[str, float | None],
+    best_within_schema_layer_by_format: dict[str, int | None],
 ) -> None:
     accuracy_text = "n/a" if best_cross_mean_accuracy is None else f"{best_cross_mean_accuracy:.3f}"
     layer_text = "n/a" if best_cross_layer is None else str(best_cross_layer)
     lines = [
-        "# Cross-format color latent report",
+        "# Color latent report",
         "",
         f"- Model: `{model_name}`",
         f"- Words: `{word_count}` from `{word_source}`",
@@ -1043,6 +1166,21 @@ def _write_run_report(
     lines.extend(
         [
             "",
+            "## Within-schema probes",
+            "",
+        ]
+    )
+    for format_name in formats:
+        layer = best_within_schema_layer_by_format.get(format_name)
+        accuracy = best_within_schema_accuracy_by_format.get(format_name)
+        layer_text_for_format = "n/a" if layer is None else str(layer)
+        accuracy_text_for_format = "n/a" if accuracy is None else f"{accuracy:.3f}"
+        lines.append(
+            f"- `{format_name}` exact-output best layer: `{layer_text_for_format}`; accuracy: `{accuracy_text_for_format}`"
+        )
+    lines.extend(
+        [
+            "",
             "## Probe transfer summary",
             "",
             f"- Best cross-format layer: `{layer_text}`",
@@ -1052,7 +1190,8 @@ def _write_run_report(
             "",
             "- `shared_pca_grid.svg`",
             "- `format_transfer_curve.svg`",
-            "- `probe_transfer.jsonl`",
+            "- `within_schema_probe_accuracy.jsonl`",
+            "- `cross_format_probe_transfer.jsonl`",
             "- `shared_pca_points.jsonl`",
         ]
     )
@@ -1066,20 +1205,23 @@ def _write_run_final_results(
     layer_summary_rows: list[dict[str, Any]],
 ) -> None:
     top_layers = sorted(
-        [row for row in layer_summary_rows if row.get("cross_mean") is not None],
-        key=lambda row: float(row["cross_mean"]),
+        [row for row in layer_summary_rows if row.get("cross_format_mean") is not None],
+        key=lambda row: float(row["cross_format_mean"]),
         reverse=True,
     )[:5]
     payload = {
         "kind": "cross_format_run",
         "key_artifacts": {
             "consensus_labels": "consensus_labels.jsonl",
+            "cross_format_probe_transfer": "cross_format_probe_transfer.jsonl",
             "heartbeat_status": "heartbeat_status.json",
+            "layer_summary": "layer_summary.jsonl",
             "probe_transfer": "probe_transfer.jsonl",
             "report": "report.md",
             "shared_pca_grid": "shared_pca_grid.svg",
             "summary": "summary.json",
             "transfer_curve": "format_transfer_curve.svg",
+            "within_schema_probe_accuracy": "within_schema_probe_accuracy.jsonl",
         },
         "summary": summary,
         "top_cross_layers": top_layers,
@@ -1092,7 +1234,8 @@ def run_color_format_latent_experiment(
     output_dir: Path,
     model_name: str,
     word_list_path: Path | None = None,
-    limit: int | None = 200,
+    word_preset: str = "default",
+    limit: int | None = 1000,
     formats: tuple[str, ...] = DEFAULT_FORMATS,
     layers: tuple[int, ...] | None = None,
     max_length: int = 96,
@@ -1103,7 +1246,7 @@ def run_color_format_latent_experiment(
     resume: bool = False,
     device: str = "auto",
 ) -> dict[str, Any]:
-    np, torch, PCA, LogisticRegression, StratifiedKFold = _require_stack()
+    np, torch, PCA, LogisticRegression, KFold = _require_stack()
     output_dir.mkdir(parents=True, exist_ok=True)
     heartbeat = HeartbeatRecorder(output_dir, label="format-latent-run")
     heartbeat.write_manifest(
@@ -1120,11 +1263,12 @@ def run_color_format_latent_experiment(
         requested_layers=None if layers is None else list(layers),
         resume=resume,
         word_list_path=None if word_list_path is None else str(word_list_path),
+        word_preset=word_preset,
     )
     phase = "setup"
     try:
         heartbeat.update(phase=phase, message="Loading word list")
-        words, word_source = _read_words(word_list_path, limit)
+        words, word_source = _read_words(word_list_path, limit, word_preset=word_preset)
         state = _ensure_checkpoint_state(
             output_dir=output_dir,
             name="run",
@@ -1140,6 +1284,7 @@ def run_color_format_latent_experiment(
                 "requested_layers": None if layers is None else list(layers),
                 "word_count": len(words),
                 "word_hash": _hash_words(words),
+                "word_preset": word_preset,
             },
             resume=resume,
         )
@@ -1353,7 +1498,7 @@ def run_color_format_latent_experiment(
             np=np,
             PCA=PCA,
             LogisticRegression=LogisticRegression,
-            StratifiedKFold=StratifiedKFold,
+            KFold=KFold,
         )
 
         summary = {
@@ -1366,7 +1511,10 @@ def run_color_format_latent_experiment(
             "parsed_counts_by_format": parsed_counts,
             "resume": resume,
             "word_count": len(words),
+            "word_preset": word_preset,
             "word_source": word_source,
+            "best_within_schema_accuracy_by_format": analysis_summary["best_within_schema_accuracy_by_format"],
+            "best_within_schema_layer_by_format": analysis_summary["best_within_schema_layer_by_format"],
         }
         _write_json(output_dir / "summary.json", summary)
         _write_run_report(
@@ -1379,6 +1527,8 @@ def run_color_format_latent_experiment(
             consensus_count=len(consensus_by_word),
             best_cross_layer=analysis_summary["best_cross_layer"],
             best_cross_mean_accuracy=analysis_summary["best_cross_mean_accuracy"],
+            best_within_schema_accuracy_by_format=analysis_summary["best_within_schema_accuracy_by_format"],
+            best_within_schema_layer_by_format=analysis_summary["best_within_schema_layer_by_format"],
         )
         _write_run_final_results(
             output_dir,
@@ -1511,6 +1661,9 @@ def export_final_results(
         "report.md",
         "shared_pca_grid.svg",
         "format_transfer_curve.svg",
+        "cross_format_probe_transfer.jsonl",
+        "within_schema_probe_accuracy.jsonl",
+        "layer_summary.jsonl",
         "probe_transfer.jsonl",
         "heartbeat_status.json",
     ):
@@ -1560,6 +1713,311 @@ def export_final_results(
     return payload
 
 
+def _load_summary_payload(output_dir: Path) -> dict[str, Any]:
+    final_results_path = output_dir / "final_results.json"
+    if final_results_path.exists():
+        payload = _read_json(final_results_path)
+        if isinstance(payload.get("summary"), dict):
+            return dict(payload["summary"])
+        return payload
+    summary_path = output_dir / "summary.json"
+    return _read_json(summary_path)
+
+
+def _write_color_word_basis_report(
+    path: Path,
+    *,
+    model_name: str,
+    word_count: int,
+    word_source: str,
+    run_summary: dict[str, Any],
+    logit_lens_summary: dict[str, Any],
+    sae_training_summary: dict[str, Any],
+    sae_analysis_summary: dict[str, Any],
+) -> None:
+    lines = [
+        "# Color-word basis experiment",
+        "",
+        f"- Model: `{model_name}`",
+        f"- Color words: `{word_count}` from `{word_source}`",
+        f"- Best cross-format layer: `{run_summary.get('best_cross_layer')}`",
+        f"- Best within-schema layers: `{run_summary.get('best_within_schema_layer_by_format')}`",
+        f"- Logit-lens best family layers: `{logit_lens_summary.get('best_color_family_layer_by_format')}`",
+        f"- SAE layer: `{sae_training_summary.get('layer')}`",
+        f"- SAE dictionary size: `{sae_training_summary.get('dictionary_size')}`",
+        "",
+        "Artifacts to inspect first:",
+        "",
+        "- `run/shared_pca_grid.svg`",
+        "- `run/within_schema_probe_accuracy.jsonl`",
+        "- `run/cross_format_probe_transfer.jsonl`",
+        "- `logit_lens/interpretation.md`",
+        "- `sae_analysis_word/schema_label_rankings.json`",
+        "- `sae_analysis_word/family_rankings.json`",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_color_word_basis_final_results(output_dir: Path, *, summary: dict[str, Any]) -> None:
+    payload = {
+        "kind": "color_word_basis_experiment",
+        "key_artifacts": {
+            "heartbeat_status": "heartbeat_status.json",
+            "report": "report.md",
+            "run_summary": "run/summary.json",
+            "logit_lens_summary": "logit_lens/summary.json",
+            "sae_training_summary": "sae_train_word/summary.json",
+            "sae_analysis_summary": "sae_analysis_word/summary.json",
+        },
+        "summary": summary,
+    }
+    _write_json(output_dir / "final_results.json", payload)
+
+
+def run_color_word_basis_experiment(
+    *,
+    output_dir: Path,
+    model_name: str,
+    word_list_path: Path | None = None,
+    limit: int | None = None,
+    layers: tuple[int, ...] | None = None,
+    max_length: int = 96,
+    max_new_tokens: int = 12,
+    batch_size: int = 16,
+    grid_stride: int = 4,
+    min_consensus_votes: int = 2,
+    logit_lens_top_token_count: int = 8,
+    sae_layer: int = 16,
+    sae_prompt_format: str = "word",
+    sae_max_length: int = 256,
+    sae_activation_batch_size: int = 32,
+    sae_train_batch_size: int = 256,
+    sae_dictionary_multiplier: int = 8,
+    sae_dictionary_size: int | None = None,
+    sae_top_k: int | None = 32,
+    sae_epochs: int = 8,
+    sae_learning_rate: float = 1e-3,
+    sae_l1_coefficient: float = 1e-4,
+    sae_validation_fraction: float = 0.1,
+    sae_seed: int = 17,
+    resume: bool = False,
+    device: str = "auto",
+) -> dict[str, Any]:
+    from .custom_sae import run_color_sae_feature_analysis, run_color_sae_training
+    from .logit_lens import run_color_logit_lens_experiment
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    heartbeat = HeartbeatRecorder(output_dir, label="color-word-basis")
+    resolved_word_list_path = word_list_path
+    if resolved_word_list_path is None:
+        candidate = bundled_color_word_list_path()
+        if candidate.exists():
+            resolved_word_list_path = candidate
+    word_preset = "default" if resolved_word_list_path is not None else "color_words"
+    preview_words, word_source = _read_words(
+        resolved_word_list_path,
+        limit,
+        word_preset=word_preset,
+    )
+    resolved_limit = len(preview_words) if limit is None else limit
+    heartbeat.write_manifest(
+        batch_size=batch_size,
+        command="color-word-basis",
+        device=device,
+        grid_stride=grid_stride,
+        layers=None if layers is None else list(layers),
+        limit=resolved_limit,
+        logit_lens_top_token_count=logit_lens_top_token_count,
+        max_length=max_length,
+        max_new_tokens=max_new_tokens,
+        min_consensus_votes=min_consensus_votes,
+        model_name=model_name,
+        resume=resume,
+        sae_activation_batch_size=sae_activation_batch_size,
+        sae_dictionary_multiplier=sae_dictionary_multiplier,
+        sae_dictionary_size=sae_dictionary_size,
+        sae_epochs=sae_epochs,
+        sae_l1_coefficient=sae_l1_coefficient,
+        sae_layer=sae_layer,
+        sae_learning_rate=sae_learning_rate,
+        sae_max_length=sae_max_length,
+        sae_prompt_format=sae_prompt_format,
+        sae_top_k=sae_top_k,
+        sae_train_batch_size=sae_train_batch_size,
+        sae_validation_fraction=sae_validation_fraction,
+        word_count=len(preview_words),
+        word_list_path=None if resolved_word_list_path is None else str(resolved_word_list_path),
+        word_source=word_source,
+    )
+    phase = "setup"
+    try:
+        heartbeat.update(
+            phase=phase,
+            message="Preparing color-word basis experiment",
+            word_count=len(preview_words),
+            word_source=word_source,
+        )
+        state = _ensure_checkpoint_state(
+            output_dir=output_dir,
+            name="color_word_basis",
+            config={
+                "grid_stride": grid_stride,
+                "layers": None if layers is None else list(layers),
+                "limit": resolved_limit,
+                "logit_lens_top_token_count": logit_lens_top_token_count,
+                "max_length": max_length,
+                "max_new_tokens": max_new_tokens,
+                "min_consensus_votes": min_consensus_votes,
+                "model_name": model_name,
+                "sae_activation_batch_size": sae_activation_batch_size,
+                "sae_dictionary_multiplier": sae_dictionary_multiplier,
+                "sae_dictionary_size": sae_dictionary_size,
+                "sae_epochs": sae_epochs,
+                "sae_l1_coefficient": sae_l1_coefficient,
+                "sae_layer": sae_layer,
+                "sae_learning_rate": sae_learning_rate,
+                "sae_max_length": sae_max_length,
+                "sae_prompt_format": sae_prompt_format,
+                "sae_top_k": sae_top_k,
+                "sae_train_batch_size": sae_train_batch_size,
+                "sae_validation_fraction": sae_validation_fraction,
+                "word_hash": _hash_words(preview_words),
+                "word_list_path": None if resolved_word_list_path is None else str(resolved_word_list_path),
+                "word_source": word_source,
+            },
+            resume=resume,
+        )
+
+        run_dir = output_dir / "run"
+        logit_lens_dir = output_dir / "logit_lens"
+        sae_train_dir = output_dir / "sae_train_word"
+        sae_analysis_dir = output_dir / "sae_analysis_word"
+
+        phase = "run"
+        heartbeat.update(phase=phase, message="Running cross-format color-word anchors")
+        run_summary = run_color_format_latent_experiment(
+            output_dir=run_dir,
+            model_name=model_name,
+            word_list_path=resolved_word_list_path,
+            word_preset=word_preset,
+            limit=resolved_limit,
+            formats=DEFAULT_FORMATS,
+            layers=layers,
+            max_length=max_length,
+            max_new_tokens=max_new_tokens,
+            batch_size=batch_size,
+            grid_stride=grid_stride,
+            min_consensus_votes=min_consensus_votes,
+            resume=resume,
+            device=device,
+        )
+        state["completed_run"] = True
+        _save_checkpoint_state(output_dir, "color_word_basis", state)
+
+        phase = "logit-lens"
+        heartbeat.update(phase=phase, message="Running color-word logit lens")
+        logit_lens_summary = run_color_logit_lens_experiment(
+            output_dir=logit_lens_dir,
+            model_name=model_name,
+            word_list_path=resolved_word_list_path,
+            word_preset=word_preset,
+            limit=resolved_limit,
+            formats=DEFAULT_FORMATS,
+            layers=layers,
+            max_length=max_length,
+            max_new_tokens=max_new_tokens,
+            batch_size=batch_size,
+            top_token_count=logit_lens_top_token_count,
+            resume=resume,
+            device=device,
+        )
+        state["completed_logit_lens"] = True
+        _save_checkpoint_state(output_dir, "color_word_basis", state)
+
+        phase = "sae-train"
+        heartbeat.update(phase=phase, message="Training SAE on color-word anchors")
+        sae_training_summary = run_color_sae_training(
+            output_dir=sae_train_dir,
+            model_name=model_name,
+            layer=sae_layer,
+            prompt_format=sae_prompt_format,
+            word_list_path=resolved_word_list_path,
+            word_preset=word_preset,
+            limit=resolved_limit,
+            max_length=sae_max_length,
+            activation_batch_size=sae_activation_batch_size,
+            train_batch_size=sae_train_batch_size,
+            device=device,
+            dictionary_multiplier=sae_dictionary_multiplier,
+            dictionary_size=sae_dictionary_size,
+            top_k=sae_top_k,
+            epochs=sae_epochs,
+            learning_rate=sae_learning_rate,
+            l1_coefficient=sae_l1_coefficient,
+            validation_fraction=sae_validation_fraction,
+            seed=sae_seed,
+            resume=resume,
+        )
+        state["completed_sae_training"] = True
+        _save_checkpoint_state(output_dir, "color_word_basis", state)
+
+        phase = "sae-analyze"
+        heartbeat.update(phase=phase, message="Analyzing SAE features on color-word run")
+        sae_analysis_summary = run_color_sae_feature_analysis(
+            sae_checkpoint_path=sae_train_dir / "sae_checkpoint.pt",
+            color_run_dir=run_dir,
+            output_dir=sae_analysis_dir,
+            layer=sae_layer,
+            format_name="word",
+            batch_size=sae_train_batch_size,
+            device="cpu" if device == "auto" else device,
+        )
+        state["completed_sae_analysis"] = True
+        _save_checkpoint_state(output_dir, "color_word_basis", state)
+
+        summary = {
+            "generated_at_utc": _utc_now(),
+            "logit_lens_dir": str(logit_lens_dir),
+            "logit_lens_summary": logit_lens_summary,
+            "model_name": model_name,
+            "resume": resume,
+            "run_dir": str(run_dir),
+            "run_summary": run_summary,
+            "sae_analysis_dir": str(sae_analysis_dir),
+            "sae_analysis_summary": sae_analysis_summary,
+            "sae_train_dir": str(sae_train_dir),
+            "sae_training_summary": sae_training_summary,
+            "word_count": len(preview_words),
+            "word_list_path": None if resolved_word_list_path is None else str(resolved_word_list_path),
+            "word_source": word_source,
+        }
+        _write_json(output_dir / "summary.json", summary)
+        _write_color_word_basis_report(
+            output_dir / "report.md",
+            model_name=model_name,
+            word_count=len(preview_words),
+            word_source=word_source,
+            run_summary=run_summary,
+            logit_lens_summary=logit_lens_summary,
+            sae_training_summary=sae_training_summary,
+            sae_analysis_summary=sae_analysis_summary,
+        )
+        _write_color_word_basis_final_results(output_dir, summary=summary)
+        phase = "completed"
+        heartbeat.update(
+            phase=phase,
+            message="Color-word basis experiment complete",
+            state="completed",
+            best_cross_layer=run_summary.get("best_cross_layer"),
+            sae_layer=sae_layer,
+            word_count=len(preview_words),
+        )
+        return summary
+    except Exception as error:
+        heartbeat.fail(phase=phase, error=error)
+        raise
+
+
 def run_color_format_patch(
     *,
     run_dir: Path,
@@ -1581,7 +2039,7 @@ def run_color_format_patch(
         raise ValueError("Residual patching currently supports layers >= 1.")
     if patch_mode not in {"replace", "add"}:
         raise ValueError("patch_mode must be one of: replace, add")
-    np, torch, _PCA, _LogisticRegression, _StratifiedKFold = _require_stack()
+    np, torch, _PCA, _LogisticRegression, _KFold = _require_stack()
     output_dir.mkdir(parents=True, exist_ok=True)
     heartbeat = HeartbeatRecorder(output_dir, label="format-latent-patch")
     heartbeat.write_manifest(
@@ -1825,14 +2283,18 @@ def run_color_format_patch(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Cross-format color latent and residual patch experiment.")
+    parser = argparse.ArgumentParser(description="Color representation experiments for language models.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    run_parser = subparsers.add_parser("run", help="Collect hidden states across color output formats.")
+    run_parser = subparsers.add_parser(
+        "run",
+        help="[legacy] Collect hidden states across color output formats.",
+    )
     run_parser.add_argument("--model-name", required=True)
     run_parser.add_argument("--output-dir", required=True, type=Path)
     run_parser.add_argument("--word-list-path", type=Path)
-    run_parser.add_argument("--limit", type=int, default=200)
+    run_parser.add_argument("--word-preset", default="default", choices=WORD_PRESET_NAMES)
+    run_parser.add_argument("--limit", type=int, default=1000)
     run_parser.add_argument("--formats", default="word,hex,rgb")
     run_parser.add_argument("--layers")
     run_parser.add_argument("--max-length", type=int, default=96)
@@ -1843,7 +2305,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--resume", action="store_true")
     run_parser.add_argument("--device", default="auto")
 
-    patch_parser = subparsers.add_parser("patch", help="Patch source-format residuals into a target-format run.")
+    patch_parser = subparsers.add_parser(
+        "patch",
+        help="[legacy] Patch source-format residuals into a target-format run.",
+    )
     patch_parser.add_argument("--model-name", required=True)
     patch_parser.add_argument("--run-dir", required=True, type=Path)
     patch_parser.add_argument("--output-dir", required=True, type=Path)
@@ -1865,12 +2330,47 @@ def build_arg_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--patch-dir", type=Path)
     export_parser.add_argument("--logit-lens-dir", type=Path)
 
-    sae_train_parser = subparsers.add_parser("sae-train", help="Train a custom SAE on one layer of color activations.")
+    basis_parser = subparsers.add_parser(
+        "color-word-basis",
+        help="[legacy] Run the older orchestrated color-word anchor study.",
+    )
+    basis_parser.add_argument("--model-name", required=True)
+    basis_parser.add_argument("--output-dir", required=True, type=Path)
+    basis_parser.add_argument("--word-list-path", type=Path)
+    basis_parser.add_argument("--limit", type=int)
+    basis_parser.add_argument("--layers")
+    basis_parser.add_argument("--max-length", type=int, default=96)
+    basis_parser.add_argument("--max-new-tokens", type=int, default=12)
+    basis_parser.add_argument("--batch-size", type=int, default=16)
+    basis_parser.add_argument("--grid-stride", type=int, default=4)
+    basis_parser.add_argument("--min-consensus-votes", type=int, default=2)
+    basis_parser.add_argument("--logit-lens-top-token-count", type=int, default=8)
+    basis_parser.add_argument("--sae-layer", type=int, default=16)
+    basis_parser.add_argument("--sae-prompt-format", default="word", choices=("word", "hex", "rgb"))
+    basis_parser.add_argument("--sae-max-length", type=int, default=256)
+    basis_parser.add_argument("--sae-activation-batch-size", type=int, default=32)
+    basis_parser.add_argument("--sae-train-batch-size", type=int, default=256)
+    basis_parser.add_argument("--sae-dictionary-multiplier", type=int, default=8)
+    basis_parser.add_argument("--sae-dictionary-size", type=int)
+    basis_parser.add_argument("--sae-top-k", type=int, default=32)
+    basis_parser.add_argument("--sae-epochs", type=int, default=8)
+    basis_parser.add_argument("--sae-learning-rate", type=float, default=1e-3)
+    basis_parser.add_argument("--sae-l1-coefficient", type=float, default=1e-4)
+    basis_parser.add_argument("--sae-validation-fraction", type=float, default=0.1)
+    basis_parser.add_argument("--sae-seed", type=int, default=17)
+    basis_parser.add_argument("--resume", action="store_true")
+    basis_parser.add_argument("--device", default="auto")
+
+    sae_train_parser = subparsers.add_parser(
+        "sae-train",
+        help="Train a custom SAE on one layer of color activations.",
+    )
     sae_train_parser.add_argument("--model-name", required=True)
     sae_train_parser.add_argument("--output-dir", required=True, type=Path)
     sae_train_parser.add_argument("--layer", required=True, type=int)
     sae_train_parser.add_argument("--prompt-format", default="hex", choices=("word", "hex", "rgb"))
     sae_train_parser.add_argument("--word-list-path", type=Path)
+    sae_train_parser.add_argument("--word-preset", default="default", choices=WORD_PRESET_NAMES)
     sae_train_parser.add_argument("--limit", type=int, default=10000)
     sae_train_parser.add_argument("--max-length", type=int, default=256)
     sae_train_parser.add_argument("--activation-batch-size", type=int, default=32)
@@ -1886,7 +2386,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sae_train_parser.add_argument("--resume", action="store_true")
     sae_train_parser.add_argument("--device", default="auto")
 
-    sae_analyze_parser = subparsers.add_parser("sae-analyze", help="Analyze a trained SAE against a completed color run.")
+    sae_analyze_parser = subparsers.add_parser(
+        "sae-analyze",
+        help="Analyze a trained SAE against a completed color run.",
+    )
     sae_analyze_parser.add_argument("--sae-checkpoint-path", required=True, type=Path)
     sae_analyze_parser.add_argument("--color-run-dir", required=True, type=Path)
     sae_analyze_parser.add_argument("--output-dir", required=True, type=Path)
@@ -1895,14 +2398,57 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sae_analyze_parser.add_argument("--batch-size", type=int, default=256)
     sae_analyze_parser.add_argument("--device", default="cpu")
 
+    sae_geometry_parser = subparsers.add_parser(
+        "sae-geometry",
+        help="Run an off-the-shelf SAE layer sweep on controlled `Color: X` prompts.",
+    )
+    sae_geometry_parser.add_argument("--model-name", required=True)
+    sae_geometry_parser.add_argument("--output-dir", required=True, type=Path)
+    sae_geometry_parser.add_argument("--sae-repo-id-or-path", default="andyrdt/saes-qwen2.5-7b-instruct")
+    sae_geometry_parser.add_argument("--sae-layers", default="3,7,11,15,19,23,27")
+    sae_geometry_parser.add_argument("--trainer-index", type=int, default=0)
+    sae_geometry_parser.add_argument("--cache-dir", type=Path)
+    sae_geometry_parser.add_argument("--word-list-path", type=Path)
+    sae_geometry_parser.add_argument("--prompt-template", default="Color: {value}")
+    sae_geometry_parser.add_argument("--word-limit", type=int)
+    sae_geometry_parser.add_argument("--batch-size", type=int, default=64)
+    sae_geometry_parser.add_argument("--encode-batch-size", type=int, default=256)
+    sae_geometry_parser.add_argument("--max-length", type=int, default=64)
+    sae_geometry_parser.add_argument("--no-word-catalog", action="store_true")
+    sae_geometry_parser.add_argument("--no-anchor-word", action="store_true")
+    sae_geometry_parser.add_argument("--no-anchor-hex", action="store_true")
+    sae_geometry_parser.add_argument("--no-anchor-rgb", action="store_true")
+    sae_geometry_parser.add_argument("--skip-silhouette", action="store_true")
+    sae_geometry_parser.add_argument("--resume", action="store_true")
+    sae_geometry_parser.add_argument("--device", default="auto")
+
+    sae_intervene_parser = subparsers.add_parser(
+        "sae-intervene",
+        help="Inject a discovered SAE family direction into a prompt and measure the completion shift.",
+    )
+    sae_intervene_parser.add_argument("--model-name", required=True)
+    sae_intervene_parser.add_argument("--geometry-dir", required=True, type=Path)
+    sae_intervene_parser.add_argument("--output-dir", required=True, type=Path)
+    sae_intervene_parser.add_argument("--layer", required=True, type=int)
+    sae_intervene_parser.add_argument("--family", required=True)
+    sae_intervene_parser.add_argument("--alpha-values", default="-8,-4,-2,-1,0,1,2,4,8")
+    sae_intervene_parser.add_argument("--prompt-mode", default="blank_hex", choices=("blank_hex", "semantic_hex"))
+    sae_intervene_parser.add_argument("--prompt-file", type=Path)
+    sae_intervene_parser.add_argument("--batch-size", type=int, default=8)
+    sae_intervene_parser.add_argument("--max-length", type=int, default=128)
+    sae_intervene_parser.add_argument("--max-new-tokens", type=int, default=16)
+    sae_intervene_parser.add_argument("--resume", action="store_true")
+    sae_intervene_parser.add_argument("--device", default="auto")
+
     logit_lens_parser = subparsers.add_parser(
         "logit-lens",
-        help="Project intermediate states through the unembedding and score color and format tokens.",
+        help="[legacy] Project intermediate states through the unembedding and score color and format tokens.",
     )
     logit_lens_parser.add_argument("--model-name", required=True)
     logit_lens_parser.add_argument("--output-dir", required=True, type=Path)
     logit_lens_parser.add_argument("--word-list-path", type=Path)
-    logit_lens_parser.add_argument("--limit", type=int, default=200)
+    logit_lens_parser.add_argument("--word-preset", default="default", choices=WORD_PRESET_NAMES)
+    logit_lens_parser.add_argument("--limit", type=int, default=1000)
     logit_lens_parser.add_argument("--formats", default="word,hex,rgb")
     logit_lens_parser.add_argument("--layers")
     logit_lens_parser.add_argument("--max-length", type=int, default=96)
@@ -1914,7 +2460,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     summarize_logit_lens_parser = subparsers.add_parser(
         "summarize-logit-lens",
-        help="Interpret an existing logit lens run without rerunning the model.",
+        help="[legacy] Interpret an existing logit lens run without rerunning the model.",
     )
     summarize_logit_lens_parser.add_argument("--run-dir", required=True, type=Path)
     return parser
@@ -1929,6 +2475,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.output_dir,
             model_name=args.model_name,
             word_list_path=args.word_list_path,
+            word_preset=args.word_preset,
             limit=args.limit,
             formats=formats,
             layers=_parse_layers(args.layers),
@@ -1967,6 +2514,36 @@ def main(argv: list[str] | None = None) -> int:
             logit_lens_dir=args.logit_lens_dir,
         )
         return 0
+    if args.command == "color-word-basis":
+        run_color_word_basis_experiment(
+            output_dir=args.output_dir,
+            model_name=args.model_name,
+            word_list_path=args.word_list_path,
+            limit=args.limit,
+            layers=_parse_layers(args.layers),
+            max_length=args.max_length,
+            max_new_tokens=args.max_new_tokens,
+            batch_size=args.batch_size,
+            grid_stride=args.grid_stride,
+            min_consensus_votes=args.min_consensus_votes,
+            logit_lens_top_token_count=args.logit_lens_top_token_count,
+            sae_layer=args.sae_layer,
+            sae_prompt_format=args.sae_prompt_format,
+            sae_max_length=args.sae_max_length,
+            sae_activation_batch_size=args.sae_activation_batch_size,
+            sae_train_batch_size=args.sae_train_batch_size,
+            sae_dictionary_multiplier=args.sae_dictionary_multiplier,
+            sae_dictionary_size=args.sae_dictionary_size,
+            sae_top_k=args.sae_top_k,
+            sae_epochs=args.sae_epochs,
+            sae_learning_rate=args.sae_learning_rate,
+            sae_l1_coefficient=args.sae_l1_coefficient,
+            sae_validation_fraction=args.sae_validation_fraction,
+            sae_seed=args.sae_seed,
+            resume=args.resume,
+            device=args.device,
+        )
+        return 0
     if args.command == "sae-train":
         from .custom_sae import run_color_sae_training
 
@@ -1976,6 +2553,7 @@ def main(argv: list[str] | None = None) -> int:
             layer=args.layer,
             prompt_format=args.prompt_format,
             word_list_path=args.word_list_path,
+            word_preset=args.word_preset,
             limit=args.limit,
             max_length=args.max_length,
             activation_batch_size=args.activation_batch_size,
@@ -2005,6 +2583,50 @@ def main(argv: list[str] | None = None) -> int:
             device=args.device,
         )
         return 0
+    if args.command == "sae-geometry":
+        from .sae_geometry import run_color_sae_geometry_experiment
+
+        run_color_sae_geometry_experiment(
+            output_dir=args.output_dir,
+            model_name=args.model_name,
+            sae_repo_id_or_path=args.sae_repo_id_or_path,
+            sae_layers=_parse_layers(args.sae_layers),
+            trainer_index=args.trainer_index,
+            cache_dir=args.cache_dir,
+            word_list_path=args.word_list_path,
+            prompt_template=args.prompt_template,
+            include_word_catalog=not args.no_word_catalog,
+            include_anchor_word=not args.no_anchor_word,
+            include_anchor_hex=not args.no_anchor_hex,
+            include_anchor_rgb=not args.no_anchor_rgb,
+            word_limit=args.word_limit,
+            batch_size=args.batch_size,
+            max_length=args.max_length,
+            encode_batch_size=args.encode_batch_size,
+            compute_silhouette=not args.skip_silhouette,
+            resume=args.resume,
+            device=args.device,
+        )
+        return 0
+    if args.command == "sae-intervene":
+        from .sae_geometry import run_color_direction_intervention_experiment
+
+        run_color_direction_intervention_experiment(
+            output_dir=args.output_dir,
+            geometry_dir=args.geometry_dir,
+            model_name=args.model_name,
+            layer=args.layer,
+            family=args.family,
+            alpha_values=args.alpha_values,
+            prompt_mode=args.prompt_mode,
+            prompt_file=args.prompt_file,
+            batch_size=args.batch_size,
+            max_length=args.max_length,
+            max_new_tokens=args.max_new_tokens,
+            resume=args.resume,
+            device=args.device,
+        )
+        return 0
     if args.command == "logit-lens":
         from .logit_lens import run_color_logit_lens_experiment
 
@@ -2013,6 +2635,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.output_dir,
             model_name=args.model_name,
             word_list_path=args.word_list_path,
+            word_preset=args.word_preset,
             limit=args.limit,
             formats=formats,
             layers=_parse_layers(args.layers),

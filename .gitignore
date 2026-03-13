@@ -2,6 +2,7 @@
 .ruff_cache/
 .venv/
 analysis/
+remote_runs/
 dist/
 build/
 *.egg-info/

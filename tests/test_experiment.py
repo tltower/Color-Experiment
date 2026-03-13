@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,8 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 import color_latent_lab.logit_lens as logit_lens
+import color_latent_lab.custom_sae as custom_sae
+import color_latent_lab.word_lists as word_lists
 from color_latent_lab import experiment
 
 WORD_FAMILIES = {
@@ -81,10 +84,10 @@ class FakeTokenizer:
 
     def _format_id(self, text: str) -> int:
         lowered = text.lower()
-        if "basic color word" in lowered:
-            return self.format_to_id["word"]
         if "hex code" in lowered:
             return self.format_to_id["hex"]
+        if "color word" in lowered:
+            return self.format_to_id["word"]
         return self.format_to_id["rgb"]
 
     def family_for_word_id(self, word_id: int) -> str:
@@ -269,12 +272,89 @@ def _install_fake_components(monkeypatch, *, fail_after_generate_calls: int | No
         "create_generation_components",
         lambda _model_name: (tokenizer, model),
     )
+    monkeypatch.setattr(
+        custom_sae,
+        "create_generation_components",
+        lambda _model_name: (tokenizer, model),
+    )
 
 
 def test_parse_format_completion_handles_word_hex_and_rgb() -> None:
     assert experiment.parse_format_completion("word", "Probably blue.").color_family == "blue"
+    assert experiment.parse_format_completion("word", "Probably scarlet.").normalized_output == "scarlet"
     assert experiment.parse_format_completion("hex", "Try #abc").normalized_output == "#aabbcc"
     assert experiment.parse_format_completion("rgb", "255,0,0").color_family == "red"
+
+
+def test_fit_transfer_accuracy_preserves_rare_consensus_labels() -> None:
+    np = __import__("numpy")
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import KFold
+
+    words = ["fire", "rose", "ocean", "sky", "forest", "moss", "orchid"]
+    source_rows = [{"word": word} for word in words]
+    target_rows = [{"word": word} for word in words]
+    source_matrix = np.array(
+        [
+            [2.0, 0.0],
+            [1.9, 0.1],
+            [-2.0, 0.0],
+            [-1.8, -0.1],
+            [0.0, 2.0],
+            [0.1, 1.8],
+            [0.0, -2.0],
+        ],
+        dtype=np.float32,
+    )
+    target_matrix = source_matrix.copy()
+    consensus_by_word = {
+        "fire": "red",
+        "rose": "red",
+        "ocean": "blue",
+        "sky": "blue",
+        "forest": "green",
+        "moss": "green",
+        "orchid": "magenta",
+    }
+
+    accuracy = experiment._fit_transfer_accuracy(
+        np=np,
+        LogisticRegression=LogisticRegression,
+        KFold=KFold,
+        source_matrix=source_matrix,
+        target_matrix=target_matrix,
+        source_rows=source_rows,
+        target_rows=target_rows,
+        consensus_by_word=consensus_by_word,
+    )
+
+    assert accuracy is not None
+    assert accuracy >= 0.5
+
+
+def test_read_words_raises_if_large_limit_has_no_dictionary(monkeypatch) -> None:
+    monkeypatch.setattr(experiment, "find_system_word_list", lambda: None)
+
+    with pytest.raises(RuntimeError, match="Requested .* built-in words are available"):
+        experiment._read_words(None, len(word_lists.default_words()) + 50)
+
+
+def test_read_words_uses_system_dictionary_for_large_limit(tmp_path: Path, monkeypatch) -> None:
+    system_words_path = tmp_path / "system_words.txt"
+    system_words_path.write_text("violet\nsunrise\nviolet\nriver\nrose\npeach\n", encoding="utf-8")
+    monkeypatch.setattr(experiment, "find_system_word_list", lambda: system_words_path)
+
+    words, source = experiment._read_words(None, len(word_lists.default_words()) + 5)
+
+    assert words == ["violet", "sunrise", "river", "rose", "peach"]
+    assert source == str(system_words_path)
+
+
+def test_read_words_uses_color_word_preset() -> None:
+    words, source = experiment._read_words(None, 6, word_preset="color_words")
+
+    assert words == ["red", "scarlet", "crimson", "carmine", "maroon", "burgundy"]
+    assert source == "color_words"
 
 
 def test_run_color_format_latent_experiment_writes_outputs_and_heartbeats(
@@ -297,10 +377,14 @@ def test_run_color_format_latent_experiment_writes_outputs_and_heartbeats(
     assert summary["layers"] == [0, 1, 2]
     assert summary["best_cross_layer"] in {0, 1, 2}
     assert summary["best_cross_mean_accuracy"] is not None
+    assert summary["best_within_schema_layer_by_format"]["word"] in {0, 1, 2}
     assert (tmp_path / "predictions_word.jsonl").exists()
     assert (tmp_path / "predictions_hex.jsonl").exists()
     assert (tmp_path / "predictions_rgb.jsonl").exists()
     assert (tmp_path / "consensus_labels.jsonl").exists()
+    assert (tmp_path / "within_schema_probe_accuracy.jsonl").exists()
+    assert (tmp_path / "cross_format_probe_transfer.jsonl").exists()
+    assert (tmp_path / "layer_summary.jsonl").exists()
     assert (tmp_path / "shared_pca_grid.svg").exists()
     assert (tmp_path / "format_transfer_curve.svg").exists()
     assert (tmp_path / "final_results.json").exists()
@@ -320,7 +404,7 @@ def test_run_color_format_latent_experiment_writes_outputs_and_heartbeats(
     assert any(event["phase"] == "analyze" for event in events)
     transfer_rows = [
         json.loads(line)
-        for line in (tmp_path / "probe_transfer.jsonl").read_text(encoding="utf-8").splitlines()
+        for line in (tmp_path / "cross_format_probe_transfer.jsonl").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
     cross_rows = [
@@ -328,6 +412,12 @@ def test_run_color_format_latent_experiment_writes_outputs_and_heartbeats(
     ]
     assert cross_rows
     assert all(row["accuracy"] is None or row["accuracy"] >= 0.5 for row in cross_rows)
+    within_rows = [
+        json.loads(line)
+        for line in (tmp_path / "within_schema_probe_accuracy.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(row["format"] == "word" and row["accuracy"] is not None for row in within_rows)
 
 
 def test_run_color_format_patch_moves_target_toward_source_family(
@@ -503,6 +593,44 @@ def test_run_color_logit_lens_experiment_writes_outputs_and_heartbeats(
     assert interpretation["semantic_color_onset_by_format"]["hex"] in {0, 1, 2}
     assert interpretation["rendering_onset_layers"]["hex"] in {0, 1, 2}
     assert interpretation["headline_findings"]
+
+
+def test_run_color_word_basis_experiment_writes_stage_outputs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _install_fake_components(monkeypatch)
+    word_list_path = tmp_path / "anchor_words.txt"
+    word_list_path.write_text("\n".join(WORD_FAMILIES) + "\n", encoding="utf-8")
+
+    summary = experiment.run_color_word_basis_experiment(
+        output_dir=tmp_path / "basis",
+        model_name="Qwen/Qwen2.5-7B-Instruct",
+        word_list_path=word_list_path,
+        limit=6,
+        sae_layer=1,
+        batch_size=2,
+        sae_activation_batch_size=2,
+        sae_train_batch_size=2,
+        sae_dictionary_multiplier=2,
+        sae_top_k=2,
+        sae_epochs=2,
+        sae_max_length=96,
+        device="cpu",
+    )
+
+    basis_dir = tmp_path / "basis"
+    assert summary["run_summary"]["best_cross_layer"] in {0, 1, 2}
+    assert summary["sae_training_summary"]["layer"] == 1
+    assert summary["sae_analysis_summary"]["format_name"] == "word"
+    assert (basis_dir / "run" / "shared_pca_grid.svg").exists()
+    assert (basis_dir / "logit_lens" / "interpretation.json").exists()
+    assert (basis_dir / "sae_train_word" / "sae_checkpoint.pt").exists()
+    assert (basis_dir / "sae_analysis_word" / "schema_label_rankings.json").exists()
+    assert (basis_dir / "summary.json").exists()
+    assert (basis_dir / "final_results.json").exists()
+    status = json.loads((basis_dir / "heartbeat_status.json").read_text(encoding="utf-8"))
+    assert status["state"] == "completed"
 
 
 def test_run_color_logit_lens_experiment_resumes_from_batch_checkpoints(
