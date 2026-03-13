@@ -277,6 +277,11 @@ def _install_fake_components(monkeypatch, *, fail_after_generate_calls: int | No
         "create_generation_components",
         lambda _model_name: (tokenizer, model),
     )
+    monkeypatch.setattr(
+        logit_lens,
+        "create_generation_components",
+        lambda _model_name: (tokenizer, model),
+    )
 
 
 def test_parse_format_completion_handles_word_hex_and_rgb() -> None:

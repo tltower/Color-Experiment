@@ -6,7 +6,20 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from . import experiment as exp
+from .color_formats import DEFAULT_FORMATS, FORMAT_PROMPTS, parse_format_completion
+from .hf import create_generation_components
+from .model_utils import _move_batch_to_device, _non_padding_last_positions, _render_prompt, _resolve_device
+from .run_support import (
+    HeartbeatRecorder,
+    _ensure_checkpoint_state,
+    _hash_words,
+    _read_json,
+    _read_prediction_rows,
+    _save_checkpoint_state,
+    _write_json,
+    _write_jsonl,
+)
+from .workflow_common import _mean_or_none, _read_words, _require_stack, _select_layers
 
 FAMILY_EXEMPLAR_HEX: dict[str, str] = {
     "red": "#ff0000",
@@ -72,11 +85,11 @@ def _save_logit_lens_batch_checkpoint(
 ) -> None:
     checkpoint_dir = _logit_lens_checkpoint_dir(output_dir, format_name)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    exp._write_jsonl(
+    _write_jsonl(
         _logit_lens_batch_predictions_path(output_dir, format_name, batch_index),
         prediction_rows,
     )
-    exp._write_jsonl(_logit_lens_batch_rows_path(output_dir, format_name, batch_index), lens_rows)
+    _write_jsonl(_logit_lens_batch_rows_path(output_dir, format_name, batch_index), lens_rows)
 
 
 def _load_logit_lens_batch_checkpoint(
@@ -89,7 +102,7 @@ def _load_logit_lens_batch_checkpoint(
     rows_path = _logit_lens_batch_rows_path(output_dir, format_name, batch_index)
     if not predictions_path.exists() or not rows_path.exists():
         return None
-    return exp._read_prediction_rows(predictions_path), exp._read_prediction_rows(rows_path)
+    return _read_prediction_rows(predictions_path), _read_prediction_rows(rows_path)
 
 
 def _get_output_embedding(model: Any) -> Any:
@@ -327,23 +340,23 @@ def _aggregate_layer_summaries(
                     else float(len(accuracy_values) / len(available_predictions)),
                     "format": format_name,
                     "layer": layer,
-                    "mean_best_family_mass": exp._mean_or_none(
+                    "mean_best_family_mass": _mean_or_none(
                         [float(row["best_family_mass"]) for row in subset if row["best_family_mass"] is not None]
                     ),
-                    "mean_hex_mass": exp._mean_or_none(
+                    "mean_hex_mass": _mean_or_none(
                         [float(row["hex_mass"]) for row in subset if row["hex_mass"] is not None]
                     ),
-                    "mean_matched_family_mass": exp._mean_or_none(
+                    "mean_matched_family_mass": _mean_or_none(
                         [
                             float(row["matched_family_mass"])
                             for row in subset
                             if row["matched_family_mass"] is not None
                         ]
                     ),
-                    "mean_rgb_mass": exp._mean_or_none(
+                    "mean_rgb_mass": _mean_or_none(
                         [float(row["rgb_mass"]) for row in subset if row["rgb_mass"] is not None]
                     ),
-                    "mean_word_mass": exp._mean_or_none(
+                    "mean_word_mass": _mean_or_none(
                         [float(row["word_mass"]) for row in subset if row["word_mass"] is not None]
                     ),
                     "sample_count": len(subset),
@@ -570,7 +583,7 @@ def _write_logit_lens_final_results(
         "interpretation": interpretation,
         "summary": summary,
     }
-    exp._write_json(output_dir / "final_results.json", payload)
+    _write_json(output_dir / "final_results.json", payload)
 
 
 def _rows_for_format(
@@ -713,29 +726,29 @@ def _write_logit_lens_interpretation_markdown(path: Path, *, interpretation: dic
 def summarize_logit_lens_run(run_dir: Path) -> dict[str, Any]:
     summary_path = run_dir / "summary.json"
     layer_summary_path = run_dir / "layer_summary.jsonl"
-    summary = exp._read_json(summary_path)
-    layer_summary_rows = exp._read_prediction_rows(layer_summary_path)
-    formats = tuple(str(value) for value in summary.get("formats", exp.DEFAULT_FORMATS))
+    summary = _read_json(summary_path)
+    layer_summary_rows = _read_prediction_rows(layer_summary_path)
+    formats = tuple(str(value) for value in summary.get("formats", DEFAULT_FORMATS))
     interpretation = summarize_logit_lens_layers(
         layer_summary_rows=layer_summary_rows,
         formats=formats,
         model_name=summary.get("model_name"),
         word_count=summary.get("word_count"),
     )
-    exp._write_json(run_dir / "interpretation.json", interpretation)
+    _write_json(run_dir / "interpretation.json", interpretation)
     _write_logit_lens_interpretation_markdown(
         run_dir / "interpretation.md",
         interpretation=interpretation,
     )
     final_results_path = run_dir / "final_results.json"
     if final_results_path.exists():
-        payload = exp._read_json(final_results_path)
+        payload = _read_json(final_results_path)
         payload["interpretation"] = interpretation
         key_artifacts = dict(payload.get("key_artifacts", {}))
         key_artifacts["interpretation"] = "interpretation.json"
         key_artifacts["interpretation_markdown"] = "interpretation.md"
         payload["key_artifacts"] = key_artifacts
-        exp._write_json(final_results_path, payload)
+        _write_json(final_results_path, payload)
     return interpretation
 
 
@@ -746,7 +759,7 @@ def run_color_logit_lens_experiment(
     word_list_path: Path | None = None,
     word_preset: str = "default",
     limit: int | None = 1000,
-    formats: tuple[str, ...] = exp.DEFAULT_FORMATS,
+    formats: tuple[str, ...] = DEFAULT_FORMATS,
     layers: tuple[int, ...] | None = None,
     max_length: int = 96,
     max_new_tokens: int = 12,
@@ -755,9 +768,9 @@ def run_color_logit_lens_experiment(
     resume: bool = False,
     device: str = "auto",
 ) -> dict[str, Any]:
-    np, torch, _PCA, _LogisticRegression, _KFold = exp._require_stack()
+    np, torch, _PCA, _LogisticRegression, _KFold = _require_stack()
     output_dir.mkdir(parents=True, exist_ok=True)
-    heartbeat = exp.HeartbeatRecorder(output_dir, label="logit-lens")
+    heartbeat = HeartbeatRecorder(output_dir, label="logit-lens")
     heartbeat.write_manifest(
         batch_size=batch_size,
         command="logit-lens",
@@ -776,8 +789,8 @@ def run_color_logit_lens_experiment(
     phase = "setup"
     try:
         heartbeat.update(phase=phase, message="Loading word list")
-        words, word_source = exp._read_words(word_list_path, limit, word_preset=word_preset)
-        state = exp._ensure_checkpoint_state(
+        words, word_source = _read_words(word_list_path, limit, word_preset=word_preset)
+        state = _ensure_checkpoint_state(
             output_dir=output_dir,
             name="logit_lens",
             config={
@@ -790,13 +803,13 @@ def run_color_logit_lens_experiment(
                 "requested_layers": None if layers is None else list(layers),
                 "top_token_count": top_token_count,
                 "word_count": len(words),
-                "word_hash": exp._hash_words(words),
+                "word_hash": _hash_words(words),
                 "word_preset": word_preset,
             },
             resume=resume,
         )
-        tokenizer, model = exp.create_generation_components(model_name)
-        device_obj = exp._resolve_device(torch, device)
+        tokenizer, model = create_generation_components(model_name)
+        device_obj = _resolve_device(torch, device)
         model = model.to(device_obj)
         model.eval()
         output_embedding = _get_output_embedding(model)
@@ -814,7 +827,7 @@ def run_color_logit_lens_experiment(
         )
 
         for format_position, format_name in enumerate(formats, start=1):
-            if format_name not in exp.FORMAT_PROMPTS:
+            if format_name not in FORMAT_PROMPTS:
                 raise ValueError(f"Unsupported format {format_name!r}")
             phase = "collect"
             total_batches = math.ceil(len(words) / batch_size)
@@ -832,7 +845,7 @@ def run_color_logit_lens_experiment(
                 and predictions_path.exists()
             )
             if format_complete:
-                format_rows = exp._read_prediction_rows(predictions_path)
+                format_rows = _read_prediction_rows(predictions_path)
                 predictions_by_format[format_name] = format_rows
                 parsed_counts[format_name] = sum(
                     1 for row in format_rows if row["color_family"] is not None
@@ -851,7 +864,7 @@ def run_color_logit_lens_experiment(
                 if not loaded_rows and (output_dir / "logit_lens_rows.jsonl").exists():
                     loaded_rows = [
                         row
-                        for row in exp._read_prediction_rows(output_dir / "logit_lens_rows.jsonl")
+                        for row in _read_prediction_rows(output_dir / "logit_lens_rows.jsonl")
                         if row["format"] == format_name
                     ]
                 lens_rows.extend(loaded_rows)
@@ -863,7 +876,7 @@ def run_color_logit_lens_experiment(
                 )
                 continue
 
-            prompt_template = exp.FORMAT_PROMPTS[format_name]
+            prompt_template = FORMAT_PROMPTS[format_name]
             format_prediction_rows: list[dict[str, Any]] = []
             for batch_index, start in enumerate(range(0, len(words), batch_size), start=1):
                 loaded_checkpoint = (
@@ -898,7 +911,7 @@ def run_color_logit_lens_experiment(
                     continue
                 batch_words = words[start : start + batch_size]
                 prompts = [
-                    exp._render_prompt(tokenizer, prompt_template.format(word=word))
+                    _render_prompt(tokenizer, prompt_template.format(word=word))
                     for word in batch_words
                 ]
                 encoded = tokenizer(
@@ -908,14 +921,14 @@ def run_color_logit_lens_experiment(
                     max_length=max_length,
                     return_tensors="pt",
                 )
-                encoded_device = exp._move_batch_to_device(encoded, device_obj)
+                encoded_device = _move_batch_to_device(encoded, device_obj)
                 with torch.no_grad():
                     outputs = model(**encoded_device)
                 if selected_layers is None:
-                    selected_layers = exp._select_layers(outputs.hidden_states, layers)
+                    selected_layers = _select_layers(outputs.hidden_states, layers)
                     state["selected_layers"] = list(selected_layers)
-                    exp._save_checkpoint_state(output_dir, "logit_lens", state)
-                last_positions = exp._non_padding_last_positions(encoded_device["attention_mask"])
+                    _save_checkpoint_state(output_dir, "logit_lens", state)
+                last_positions = _non_padding_last_positions(encoded_device["attention_mask"])
                 generation_kwargs: dict[str, Any] = {
                     **encoded_device,
                     "do_sample": False,
@@ -936,7 +949,7 @@ def run_color_logit_lens_experiment(
                 )
                 batch_predictions: list[dict[str, Any]] = []
                 for word, prompt, raw_completion in zip(batch_words, prompts, completions, strict=True):
-                    parsed = exp.parse_format_completion(format_name, raw_completion)
+                    parsed = parse_format_completion(format_name, raw_completion)
                     batch_predictions.append(
                         {
                             "color_family": parsed.color_family,
@@ -986,11 +999,11 @@ def run_color_logit_lens_experiment(
                     total_words=len(words),
                 )
             predictions_by_format[format_name] = format_prediction_rows
-            exp._write_jsonl(predictions_path, format_prediction_rows)
+            _write_jsonl(predictions_path, format_prediction_rows)
             completed_formats = set(state.get("completed_formats", []))
             completed_formats.add(format_name)
             state["completed_formats"] = sorted(completed_formats)
-            exp._save_checkpoint_state(output_dir, "logit_lens", state)
+            _save_checkpoint_state(output_dir, "logit_lens", state)
             heartbeat.event(
                 phase=phase,
                 message=f"Saved logit lens predictions for {format_name}",
@@ -1003,14 +1016,14 @@ def run_color_logit_lens_experiment(
 
         phase = "analyze"
         heartbeat.update(phase=phase, message="Aggregating logit lens summaries")
-        exp._write_jsonl(output_dir / "logit_lens_rows.jsonl", lens_rows)
+        _write_jsonl(output_dir / "logit_lens_rows.jsonl", lens_rows)
         layer_summary_rows, top_token_rows = _aggregate_layer_summaries(
             formats=formats,
             layers=selected_layers,
             lens_rows=lens_rows,
         )
-        exp._write_jsonl(output_dir / "layer_summary.jsonl", layer_summary_rows)
-        exp._write_jsonl(output_dir / "top_token_snapshots.jsonl", top_token_rows)
+        _write_jsonl(output_dir / "layer_summary.jsonl", layer_summary_rows)
+        _write_jsonl(output_dir / "top_token_snapshots.jsonl", top_token_rows)
         _write_logit_lens_curve_svg(
             output_dir / "logit_lens_curve.svg",
             layer_summary_rows=layer_summary_rows,
@@ -1022,7 +1035,7 @@ def run_color_logit_lens_experiment(
             model_name=model_name,
             word_count=len(words),
         )
-        exp._write_json(output_dir / "interpretation.json", interpretation)
+        _write_json(output_dir / "interpretation.json", interpretation)
         _write_logit_lens_interpretation_markdown(
             output_dir / "interpretation.md",
             interpretation=interpretation,
@@ -1043,7 +1056,7 @@ def run_color_logit_lens_experiment(
             "word_preset": word_preset,
             "word_source": word_source,
         }
-        exp._write_json(output_dir / "summary.json", summary)
+        _write_json(output_dir / "summary.json", summary)
         _write_logit_lens_report(
             output_dir / "report.md",
             model_name=model_name,

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,22 +13,18 @@ import torch.nn.functional as F
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 
-from .experiment import (
-    FORMAT_PROMPTS,
+from .color_formats import FORMAT_PROMPTS
+from .model_utils import _non_padding_last_positions, _render_prompt, _resolve_device
+from .run_support import (
     HeartbeatRecorder,
-    _non_padding_last_positions,
     _read_prediction_rows,
-    _render_prompt,
-    _resolve_device,
+    _utc_now,
     _write_json,
     _write_jsonl,
 )
 from .hf import create_generation_components
 from .word_lists import default_words, find_system_word_list, preset_words, read_word_file
 
-
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 def load_training_words(
     *,

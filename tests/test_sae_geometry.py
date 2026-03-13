@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch
 
@@ -15,6 +17,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from color_latent_lab import custom_sae
+from color_latent_lab import probe_compare
 import color_latent_lab.sae_geometry as sae_geometry
 
 
@@ -228,6 +231,16 @@ def _write_fake_sae_repo(root: Path, *, layers: tuple[int, ...]) -> None:
         )
 
 
+def _load_direction_characterization_module():
+    module_path = REPO_ROOT / "scripts" / "direction_characterization.py"
+    spec = importlib.util.spec_from_file_location("direction_characterization", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load module spec for {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_load_off_the_shelf_sae_from_local_checkpoint_root(tmp_path: Path) -> None:
     repo_root = tmp_path / "fake_sae_repo"
     _write_fake_sae_repo(repo_root, layers=(0,))
@@ -336,6 +349,234 @@ def test_run_color_sae_geometry_experiment_writes_layer_outputs(
     checkpoint_state = json.loads((geometry_dir / "checkpoints" / "sae_geometry_state.json").read_text(encoding="utf-8"))
     assert checkpoint_state["capture_complete"] is True
     assert checkpoint_state["completed_layers"] == [0, 1]
+
+
+def test_build_geometry_panel_can_mirror_catalog_formats_with_color_labels(tmp_path: Path) -> None:
+    word_list_path = tmp_path / "colors.txt"
+    word_list_path.write_text("red\ncerulean\n", encoding="utf-8")
+
+    rows, metadata = sae_geometry._build_geometry_panel(
+        word_list_path=word_list_path,
+        include_word_catalog=True,
+        include_anchor_word=False,
+        include_anchor_hex=False,
+        include_anchor_rgb=False,
+        catalog_formats=("word", "hex", "rgb"),
+        word_limit=None,
+        prompt_template="Color: {value}",
+    )
+
+    assert metadata["catalog_count"] == 2
+    assert metadata["catalog_formats"] == ["word", "hex", "rgb"]
+    assert len(rows) == 6
+    cerulean_rows = [row for row in rows if row["color_label"] == "cerulean"]
+    assert [row["schema"] for row in cerulean_rows] == ["word", "hex", "rgb"]
+    assert cerulean_rows[0]["value"] == "cerulean"
+    assert cerulean_rows[1]["value"] == "#007ba7"
+    assert cerulean_rows[2]["value"] == "0,123,167"
+
+
+def test_probe_compare_reports_residual_and_sae_probe_scores(tmp_path: Path) -> None:
+    geometry_dir = tmp_path / "geometry"
+    (geometry_dir / "activations").mkdir(parents=True, exist_ok=True)
+    (geometry_dir / "layer_00").mkdir(parents=True, exist_ok=True)
+    panel_rows = [
+        {"color_label": "cerulean", "color_family": "blue", "group": "catalog", "record_id": "word-0", "schema": "word", "value": "cerulean"},
+        {"color_label": "cerulean", "color_family": "blue", "group": "catalog", "record_id": "hex-0", "schema": "hex", "value": "#007ba7"},
+        {"color_label": "cerulean", "color_family": "blue", "group": "catalog", "record_id": "rgb-0", "schema": "rgb", "value": "0,123,167"},
+        {"color_label": "saffron", "color_family": "yellow", "group": "catalog", "record_id": "word-1", "schema": "word", "value": "saffron"},
+        {"color_label": "saffron", "color_family": "yellow", "group": "catalog", "record_id": "hex-1", "schema": "hex", "value": "#f4c430"},
+        {"color_label": "saffron", "color_family": "yellow", "group": "catalog", "record_id": "rgb-1", "schema": "rgb", "value": "244,196,48"},
+    ]
+    (geometry_dir / "panel.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in panel_rows) + "\n",
+        encoding="utf-8",
+    )
+
+    residual = np.array(
+        [
+            [2.0, 0.0],
+            [1.8, 0.2],
+            [2.1, -0.1],
+            [-2.0, 0.0],
+            [-1.9, 0.1],
+            [-2.2, -0.2],
+        ],
+        dtype=np.float32,
+    )
+    encoded = np.array(
+        [
+            [3.0, 0.0, 0.0],
+            [2.7, 0.1, 0.0],
+            [3.2, -0.1, 0.0],
+            [0.0, 3.0, 0.0],
+            [0.0, 2.8, 0.1],
+            [0.0, 3.1, -0.1],
+        ],
+        dtype=np.float32,
+    )
+    np.save(geometry_dir / "activations" / "layer_00.npy", residual)
+    np.save(geometry_dir / "layer_00" / "encoded_features.npy", encoded)
+
+    summary = probe_compare.run_probe_comparison(
+        geometry_dir=geometry_dir,
+        output_dir=tmp_path / "probe_compare",
+        layers=(0,),
+        label_mode="color_word",
+        schema_filter=("word", "hex", "rgb"),
+        include_anchors=False,
+        include_catalog=True,
+        center_mode="none",
+    )
+
+    assert summary["best_residual_layer"] == 0
+    assert summary["best_sae_layer"] == 0
+    layer_rows = [
+        json.loads(line)
+        for line in (tmp_path / "probe_compare" / "layer_summary.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert layer_rows[0]["residual_accuracy"] >= 1.0
+    assert layer_rows[0]["sae_accuracy"] >= 1.0
+    assert (tmp_path / "probe_compare" / "accuracy_curve.svg").exists()
+
+
+def test_direction_characterization_writes_expected_outputs(tmp_path: Path) -> None:
+    direction_characterization = _load_direction_characterization_module()
+    geometry_dir = tmp_path / "geometry"
+    layer_dir = geometry_dir / "layer_11"
+    directions_dir = layer_dir / "directions"
+    directions_dir.mkdir(parents=True, exist_ok=True)
+    panel_rows = []
+
+    families = list(sae_geometry.CORE_COLOR_FAMILIES)
+    for index, family in enumerate(families):
+        angle = (2.0 * np.pi * index) / len(families)
+        vector = np.array(
+            [np.cos(angle), np.sin(angle), index / 10.0, 1.0],
+            dtype=np.float32,
+        )
+        np.save(directions_dir / f"{family}_direction.npy", vector)
+        panel_rows.append(
+            {
+                "color_family": family,
+                "color_label": family,
+                "prompt": f"Color: {family}",
+                "schema": "word",
+                "value": family,
+            }
+        )
+    np.save(directions_dir / "warm_cool_direction.npy", np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+    (geometry_dir / "panel.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in panel_rows) + "\n",
+        encoding="utf-8",
+    )
+    encoded = np.zeros((len(families), len(families)), dtype=np.float32)
+    for index in range(len(families)):
+        encoded[index, index] = 5.0
+    np.save(layer_dir / "encoded_features.npy", encoded)
+
+    family_feature_rankings = {
+        family: [
+            {
+                "delta": float(index + 1),
+                "feature": index,
+                "negative_mean": -0.5,
+                "positive_mean": 0.5,
+            }
+        ]
+        for index, family in enumerate(families)
+    }
+    (layer_dir / "family_feature_rankings.json").write_text(
+        json.dumps(family_feature_rankings),
+        encoding="utf-8",
+    )
+    (layer_dir / "feature_scores.jsonl").write_text(
+        json.dumps(
+            {
+                "color_eta_squared": 0.8,
+                "feature": 0,
+                "format_eta_squared": 0.1,
+                "invariant_score": 0.7,
+            }
+        )
+        + "\n"
+        + "\n".join(
+            json.dumps(
+                {
+                    "color_eta_squared": 0.8,
+                    "feature": index,
+                    "format_eta_squared": 0.1,
+                    "invariant_score": 0.7,
+                }
+            )
+            for index in range(1, len(families))
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    summary = direction_characterization.run_characterization(
+        geometry_dir=geometry_dir,
+        output_dir=tmp_path / "characterization",
+        layers=(11,),
+        top_k=3,
+    )
+
+    output_dir = tmp_path / "characterization" / "layer_11"
+    assert summary["layers"] == [11]
+    assert (output_dir / "direction_cosine_similarity.json").exists()
+    assert (output_dir / "direction_cosine_similarity.svg").exists()
+    assert (output_dir / "direction_color_wheel.svg").exists()
+    assert (output_dir / "feature_attribution.json").exists()
+    assert (output_dir / "effective_dimensionality.json").exists()
+    assert (output_dir / "warm_cool_projection.json").exists()
+    assert (output_dir / "opponent_structure.json").exists()
+    attribution = json.loads((output_dir / "feature_attribution.json").read_text(encoding="utf-8"))
+    assert attribution["red"][0]["feature"] == 0
+    assert attribution["red"][0]["top_prompts"][0]["value"] == "red"
+    assert (output_dir / "direction_feature_cards.md").exists()
+    assert (tmp_path / "characterization" / "report.md").exists()
+
+
+def test_sae_intervene_can_run_in_description_mode(tmp_path: Path, monkeypatch) -> None:
+    _install_fake_geometry_components(monkeypatch)
+    geometry_dir = tmp_path / "geometry"
+    directions_dir = geometry_dir / "layer_00" / "directions"
+    directions_dir.mkdir(parents=True, exist_ok=True)
+    np.save(directions_dir / "red_direction.npy", np.array([0.5, 0.0, 0.0, 0.0, 0.0], dtype=np.float32))
+
+    prompt_file = tmp_path / "describe.txt"
+    prompt_file.write_text(
+        "Describe the appearance of the color #ff0000 in three adjectives. Do not name objects.\n",
+        encoding="utf-8",
+    )
+
+    summary = sae_geometry.run_color_direction_intervention_experiment(
+        output_dir=tmp_path / "intervene",
+        geometry_dir=geometry_dir,
+        model_name="Qwen/Qwen2.5-7B-Instruct",
+        layer=0,
+        family="red",
+        alpha_values="-1,0,1",
+        prompt_mode="blank_hex",
+        prompt_file=prompt_file,
+        output_format="description",
+        batch_size=1,
+        max_length=32,
+        max_new_tokens=4,
+        device="cpu",
+    )
+
+    assert summary["output_format"] == "description"
+    assert summary["best_target_match_rate"] is None
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "intervene" / "intervention_rows.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert all(row["matched_target_family"] is None for row in rows)
+    assert all(row["output_format"] == "description" for row in rows)
 
 
 def test_run_color_sae_geometry_uses_torch_pca_lowrank(

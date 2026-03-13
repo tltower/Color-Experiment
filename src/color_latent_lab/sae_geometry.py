@@ -7,26 +7,25 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from .color_palette import COLOR_WORD_SYNONYMS, approximate_color_word_hex, hex_to_rgb_string
 from .custom_sae import SparseAutoencoder
-from .experiment import (
-    COLOR_WORD_SYNONYMS,
-    FAMILY_PALETTE,
-    FORMAT_STROKES,
-    FORMAT_PROMPTS,
-    HeartbeatRecorder,
-    _ensure_checkpoint_state,
-    _read_json,
-    _read_prediction_rows,
-    _save_checkpoint_state,
+from .color_formats import FAMILY_PALETTE, FORMAT_PROMPTS, FORMAT_STROKES, parse_format_completion
+from .model_utils import (
     _coerce_hidden_output,
     _find_transformer_blocks,
     _move_batch_to_device,
     _non_padding_last_positions,
     _render_prompt,
     _resolve_device,
+)
+from .run_support import (
+    HeartbeatRecorder,
+    _ensure_checkpoint_state,
+    _read_json,
+    _read_prediction_rows,
+    _save_checkpoint_state,
     _write_json,
     _write_jsonl,
-    parse_format_completion,
 )
 from .hf import create_generation_components
 from .word_lists import bundled_color_word_list_path, read_word_file
@@ -126,6 +125,7 @@ def _build_geometry_panel(
     include_anchor_word: bool,
     include_anchor_hex: bool,
     include_anchor_rgb: bool,
+    catalog_formats: tuple[str, ...] = ("word",),
     word_limit: int | None,
     prompt_template: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -145,6 +145,7 @@ def _build_geometry_panel(
                 rows.append(
                     {
                         "color_family": family,
+                        "color_label": family,
                         "group": "anchor",
                         "prompt": prompt_template.format(value=value),
                         "record_id": f"anchor-{schema}-{family}",
@@ -154,24 +155,44 @@ def _build_geometry_panel(
                 )
     catalog_words: list[str] = []
     if include_word_catalog:
+        resolved_catalog_formats = tuple(dict.fromkeys(schema.strip() for schema in catalog_formats if schema.strip()))
+        if not resolved_catalog_formats:
+            raise ValueError("catalog_formats must include at least one schema when the word catalog is enabled.")
         catalog_words = _read_color_words(word_list_path, limit=word_limit)
         for index, word in enumerate(catalog_words):
-            rows.append(
-                {
-                    "color_family": _family_for_color_word(word),
-                    "display_label": word,
-                    "group": "catalog",
-                    "prompt": prompt_template.format(value=word),
-                    "record_id": f"catalog-word-{index:04d}",
-                    "schema": "word",
-                    "value": word,
-                }
-            )
+            normalized_word = word.strip().lower()
+            approximate_hex = approximate_color_word_hex(normalized_word)
+            for schema in resolved_catalog_formats:
+                if schema == "word":
+                    value = word
+                elif schema == "hex":
+                    if approximate_hex is None:
+                        continue
+                    value = approximate_hex
+                elif schema == "rgb":
+                    if approximate_hex is None:
+                        continue
+                    value = hex_to_rgb_string(approximate_hex)
+                else:
+                    raise ValueError(f"Unsupported catalog schema: {schema}")
+                rows.append(
+                    {
+                        "color_family": _family_for_color_word(word),
+                        "color_label": normalized_word,
+                        "display_label": word,
+                        "group": "catalog",
+                        "prompt": prompt_template.format(value=value),
+                        "record_id": f"catalog-{schema}-{index:04d}",
+                        "schema": schema,
+                        "value": value,
+                    }
+                )
     if not rows:
         raise ValueError("The geometry panel is empty; enable at least one anchor schema or the word catalog.")
     panel_metadata = {
         "anchor_count": anchor_count,
         "catalog_count": len(catalog_words),
+        "catalog_formats": list(dict.fromkeys(schema.strip() for schema in catalog_formats if schema.strip())),
         "prompt_template": prompt_template,
         "word_list_path": None if word_list_path is None else str(word_list_path),
     }
@@ -1115,6 +1136,7 @@ def run_color_sae_geometry_experiment(
     include_anchor_word: bool = True,
     include_anchor_hex: bool = True,
     include_anchor_rgb: bool = True,
+    catalog_formats: tuple[str, ...] = ("word",),
     word_limit: int | None = None,
     batch_size: int = 64,
     max_length: int = 64,
@@ -1132,6 +1154,7 @@ def run_color_sae_geometry_experiment(
         include_anchor_word=include_anchor_word,
         include_anchor_hex=include_anchor_hex,
         include_anchor_rgb=include_anchor_rgb,
+        catalog_formats=catalog_formats,
         word_limit=word_limit,
         prompt_template=prompt_template,
     )
@@ -1140,6 +1163,7 @@ def run_color_sae_geometry_experiment(
         "batch_size": batch_size,
         "cache_dir": None if cache_dir is None else str(cache_dir),
         "compute_silhouette": compute_silhouette,
+        "catalog_formats": list(catalog_formats),
         "device": device,
         "encode_batch_size": encode_batch_size,
         "include_anchor_hex": include_anchor_hex,
@@ -1286,7 +1310,7 @@ def _intervention_prompts(
     *,
     prompt_mode: str,
     prompt_file: Path | None,
-) -> tuple[list[dict[str, Any]], str]:
+) -> list[dict[str, Any]]:
     if prompt_file is not None:
         rows = []
         for index, raw_line in enumerate(prompt_file.read_text(encoding="utf-8").splitlines()):
@@ -1296,21 +1320,35 @@ def _intervention_prompts(
             rows.append({"prompt_id": f"file-{index:04d}", "prompt": line})
         if not rows:
             raise ValueError(f"No prompts loaded from {prompt_file}")
-        return rows, "hex"
+        return rows
     if prompt_mode == "blank_hex":
-        return [{"prompt_id": "blank-hex", "prompt": "Hex code for:"}], "hex"
+        return [{"prompt_id": "blank-hex", "prompt": "Hex code for:"}]
     if prompt_mode == "semantic_hex":
-        return (
-            [
-                {
-                    "prompt_id": f"semantic-{word}",
-                    "prompt": FORMAT_PROMPTS["hex"].format(word=word),
-                }
-                for word in BUILTIN_SEMANTIC_OBJECTS
-            ],
-            "hex",
-        )
+        return [
+            {
+                "prompt_id": f"semantic-{word}",
+                "prompt": FORMAT_PROMPTS["hex"].format(word=word),
+            }
+            for word in BUILTIN_SEMANTIC_OBJECTS
+        ]
     raise ValueError(f"Unsupported intervention prompt mode {prompt_mode!r}")
+
+
+def _resolve_intervention_output_format(
+    *,
+    prompt_mode: str,
+    prompt_file: Path | None,
+    output_format: str | None,
+) -> str:
+    if output_format is not None:
+        return output_format
+    if prompt_file is not None:
+        return "hex"
+    if prompt_mode in {"blank_hex", "semantic_hex"}:
+        return "hex"
+    raise ValueError(
+        "Could not infer an intervention output format. Pass `--output-format` explicitly."
+    )
 
 
 def _parse_alphas(alpha_values: str) -> list[float]:
@@ -1336,9 +1374,10 @@ def _write_intervention_report(path: Path, *, summary: dict[str, Any]) -> None:
         "# SAE direction intervention report",
         "",
         f"- Model: `{summary['model_name']}`",
-        f"- Target family: `{summary['target_family']}`",
+        f"- Direction: `{summary.get('direction_name', summary.get('target_family'))}`",
         f"- Layer: `{summary['layer']}`",
         f"- Prompt mode: `{summary['prompt_mode']}`",
+        f"- Output format: `{summary.get('output_format')}`",
         f"- Alphas: `{summary['alphas']}`",
         f"- Best alpha: `{summary['best_alpha']}`",
         f"- Best target-family match rate: `{summary['best_target_match_rate']}`",
@@ -1349,6 +1388,8 @@ def _write_intervention_report(path: Path, *, summary: dict[str, Any]) -> None:
         "- `alpha_summary.jsonl`",
         "- `summary.json`",
     ]
+    if summary.get("match_target_family") is None:
+        lines.insert(8, "- Target-family match metric: `not applicable for this direction/output format`")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -1397,6 +1438,7 @@ def run_color_direction_intervention_experiment(
     alpha_values: str = "-8,-4,-2,-1,0,1,2,4,8",
     prompt_mode: str = "blank_hex",
     prompt_file: Path | None = None,
+    output_format: str | None = None,
     batch_size: int = 8,
     max_length: int = 128,
     max_new_tokens: int = 16,
@@ -1406,19 +1448,27 @@ def run_color_direction_intervention_experiment(
     np, torch, _ = _require_geometry_stack()
     output_dir.mkdir(parents=True, exist_ok=True)
     heartbeat = HeartbeatRecorder(output_dir, label="sae-intervene")
-    prompts, parse_format = _intervention_prompts(prompt_mode=prompt_mode, prompt_file=prompt_file)
+    prompts = _intervention_prompts(prompt_mode=prompt_mode, prompt_file=prompt_file)
+    resolved_output_format = _resolve_intervention_output_format(
+        prompt_mode=prompt_mode,
+        prompt_file=prompt_file,
+        output_format=output_format,
+    )
     alphas = _parse_alphas(alpha_values)
     direction = _load_direction(np, geometry_dir, layer, family)
+    match_target_family = family if family in CORE_COLOR_FAMILIES and resolved_output_format != "description" else None
     config = {
         "alpha_values": [float(value) for value in alphas],
         "batch_size": batch_size,
         "device": device,
+        "direction_name": family,
         "family": family,
         "geometry_dir": str(geometry_dir),
         "layer": layer,
         "max_length": max_length,
         "max_new_tokens": max_new_tokens,
         "model_name": model_name,
+        "output_format": resolved_output_format,
         "prompt_file": None if prompt_file is None else str(prompt_file),
         "prompt_mode": prompt_mode,
         "resume_version": 1,
@@ -1435,10 +1485,11 @@ def run_color_direction_intervention_experiment(
         geometry_dir=str(geometry_dir),
         layer=layer,
         model_name=model_name,
+        output_format=resolved_output_format,
         prompt_count=len(prompts),
         prompt_mode=prompt_mode,
         resume=resume,
-        target_family=family,
+        target_direction=family,
     )
     tokenizer, model = create_generation_components(model_name)
     runtime_device = _resolve_device(torch, device)
@@ -1536,22 +1587,30 @@ def run_color_direction_intervention_experiment(
                 patched_completions,
                 strict=True,
             ):
-                baseline_parsed = parse_format_completion(parse_format, baseline_raw)
-                patched_parsed = parse_format_completion(parse_format, patched_raw)
+                if resolved_output_format == "description":
+                    baseline_parsed = None
+                    patched_parsed = None
+                else:
+                    baseline_parsed = parse_format_completion(resolved_output_format, baseline_raw)
+                    patched_parsed = parse_format_completion(resolved_output_format, patched_raw)
                 batch_rows.append(
                     {
                         "alpha": float(alpha),
-                        "baseline_family": baseline_parsed.color_family,
+                        "baseline_family": None if baseline_parsed is None else baseline_parsed.color_family,
                         "baseline_raw_completion": baseline_raw.strip(),
                         "changed": baseline_raw.strip() != patched_raw.strip(),
+                        "direction_name": family,
                         "layer": layer,
-                        "matched_target_family": patched_parsed.color_family == family,
-                        "patched_family": patched_parsed.color_family,
+                        "matched_target_family": None
+                        if match_target_family is None or patched_parsed is None
+                        else patched_parsed.color_family == match_target_family,
+                        "output_format": resolved_output_format,
+                        "patched_family": None if patched_parsed is None else patched_parsed.color_family,
                         "patched_raw_completion": patched_raw.strip(),
                         "prompt": prompt_row["prompt"],
                         "prompt_id": prompt_row["prompt_id"],
                         "prompt_mode": prompt_mode,
-                        "target_family": family,
+                        "target_family": match_target_family,
                     }
                 )
         rows.extend(batch_rows)
@@ -1565,9 +1624,12 @@ def run_color_direction_intervention_experiment(
     best_row: dict[str, Any] | None = None
     for alpha in alphas:
         alpha_group = [row for row in rows if float(row["alpha"]) == float(alpha)]
-        matched_rate = float(
-            sum(1 for row in alpha_group if row["matched_target_family"]) / len(alpha_group)
-        ) if alpha_group else None
+        matched_group = [row for row in alpha_group if row["matched_target_family"] is not None]
+        matched_rate = (
+            float(sum(1 for row in matched_group if row["matched_target_family"]) / len(matched_group))
+            if matched_group
+            else None
+        )
         changed_rate = float(sum(1 for row in alpha_group if row["changed"]) / len(alpha_group)) if alpha_group else None
         alpha_row = {
             "alpha": float(alpha),
@@ -1582,11 +1644,14 @@ def run_color_direction_intervention_experiment(
         "alphas": alphas,
         "best_alpha": None if best_row is None else float(best_row["alpha"]),
         "best_target_match_rate": None if best_row is None else float(best_row["target_match_rate"]),
+        "direction_name": family,
         "geometry_dir": str(geometry_dir),
         "layer": layer,
+        "match_target_family": match_target_family,
         "model_name": model_name,
+        "output_format": resolved_output_format,
         "prompt_mode": prompt_mode,
-        "target_family": family,
+        "target_family": match_target_family,
     }
     _write_json(output_dir / "summary.json", summary)
     _write_intervention_report(output_dir / "report.md", summary=summary)
