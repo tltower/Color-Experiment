@@ -1473,6 +1473,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sae_geometry_parser.add_argument("--resume", action="store_true")
     sae_geometry_parser.add_argument("--device", default="auto")
 
+    sae_word_sets_parser = subparsers.add_parser(
+        "sae-word-sets",
+        help="Encode the common color-family words with all SAEs and write leave-one-out feature-space cosine matrices.",
+    )
+    sae_word_sets_parser.add_argument("--model-name", required=True)
+    sae_word_sets_parser.add_argument("--output-dir", required=True, type=Path)
+    sae_word_sets_parser.add_argument("--sae-repo-id-or-path", default="andyrdt/saes-qwen2.5-7b-instruct")
+    sae_word_sets_parser.add_argument("--sae-layers", default="3,7,11,15,19,23,27")
+    sae_word_sets_parser.add_argument("--trainer-index", type=int, default=0)
+    sae_word_sets_parser.add_argument("--cache-dir", type=Path)
+    sae_word_sets_parser.add_argument("--batch-size", type=int, default=64)
+    sae_word_sets_parser.add_argument("--encode-batch-size", type=int, default=256)
+    sae_word_sets_parser.add_argument("--max-length", type=int, default=16)
+    sae_word_sets_parser.add_argument("--device", default="auto")
+
     sae_intervene_parser = subparsers.add_parser(
         "sae-intervene",
         help="Inject a discovered SAE family direction into a prompt and measure the completion shift.",
@@ -1671,6 +1686,22 @@ def main(argv: list[str] | None = None) -> int:
             encode_batch_size=args.encode_batch_size,
             compute_silhouette=not args.skip_silhouette,
             resume=args.resume,
+            device=args.device,
+        )
+        return 0
+    if args.command == "sae-word-sets":
+        from .word_set_sae import run_word_set_sae_feature_experiment
+
+        run_word_set_sae_feature_experiment(
+            output_dir=args.output_dir,
+            model_name=args.model_name,
+            sae_repo_id_or_path=args.sae_repo_id_or_path,
+            sae_layers=_parse_layers(args.sae_layers),
+            trainer_index=args.trainer_index,
+            cache_dir=args.cache_dir,
+            batch_size=args.batch_size,
+            encode_batch_size=args.encode_batch_size,
+            max_length=args.max_length,
             device=args.device,
         )
         return 0

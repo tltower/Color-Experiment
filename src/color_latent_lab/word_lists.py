@@ -557,3 +557,7 @@ def preset_words(word_preset: str, *, limit: int | None = None) -> list[str]:
 
 def bundled_color_word_list_path() -> Path:
     return Path(__file__).resolve().parents[2] / "word_lists" / "english_color_words.txt"
+
+
+def bundled_unambiguous_color_word_list_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "word_lists" / "english_color_words_unambiguous.txt"

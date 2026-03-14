@@ -12,6 +12,7 @@ from .sae_geometry import (
     run_color_direction_intervention_experiment,
     run_color_sae_geometry_experiment,
 )
+from .word_set_sae import run_word_set_sae_feature_experiment
 
 __all__ = [
     "DEFAULT_FORMATS",
@@ -29,5 +30,6 @@ __all__ = [
     "run_color_sae_geometry_experiment",
     "run_color_sae_feature_analysis",
     "run_color_sae_training",
+    "run_word_set_sae_feature_experiment",
     "summarize_logit_lens_run",
 ]
