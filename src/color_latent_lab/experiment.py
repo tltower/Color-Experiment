@@ -1488,6 +1488,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     sae_word_sets_parser.add_argument("--max-length", type=int, default=16)
     sae_word_sets_parser.add_argument("--device", default="auto")
 
+    sae_word_set_heatmaps_parser = subparsers.add_parser(
+        "sae-word-set-heatmaps",
+        help="Render SVG heatmaps from an existing SAE word-set cosine-matrix run.",
+    )
+    sae_word_set_heatmaps_parser.add_argument("--run-dir", required=True, type=Path)
+    sae_word_set_heatmaps_parser.add_argument("--output-dir", type=Path)
+
     sae_intervene_parser = subparsers.add_parser(
         "sae-intervene",
         help="Inject a discovered SAE family direction into a prompt and measure the completion shift.",
@@ -1703,6 +1710,14 @@ def main(argv: list[str] | None = None) -> int:
             encode_batch_size=args.encode_batch_size,
             max_length=args.max_length,
             device=args.device,
+        )
+        return 0
+    if args.command == "sae-word-set-heatmaps":
+        from .word_set_sae import render_word_set_sae_heatmaps
+
+        render_word_set_sae_heatmaps(
+            run_dir=args.run_dir,
+            output_dir=args.output_dir,
         )
         return 0
     if args.command == "probe-compare":

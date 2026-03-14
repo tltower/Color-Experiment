@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -214,11 +215,20 @@ def test_run_word_set_sae_feature_experiment_writes_cosine_matrices(
     final_results = json.loads((output_dir / "final_results.json").read_text(encoding="utf-8"))
     assert final_results["key_artifacts"]["heartbeat_status"] == "heartbeat_status.json"
     assert final_results["key_artifacts"]["heartbeat_events"] == "heartbeat_events.jsonl"
+    assert final_results["key_artifacts"]["heatmap_index"] == "heatmaps/index.html"
     report_text = (output_dir / "report.md").read_text(encoding="utf-8")
     assert "heartbeat_status.json" in report_text
     assert "heartbeat_events.jsonl" in report_text
+    assert "heatmaps/index.html" in report_text
+    heatmap_index = (output_dir / "heatmaps" / "index.html").read_text(encoding="utf-8")
+    assert "Layer 0" in heatmap_index
+    assert "Layer 1" in heatmap_index
+    heatmap_svg = (output_dir / "heatmaps" / "layer_00_cosine_heatmap.svg").read_text(encoding="utf-8")
+    assert "Layer 0 cosine similarity heatmap" in heatmap_svg
+    assert "red vs blue" in heatmap_svg
     captured = capsys.readouterr()
     assert "[sae-word-sets:collect]" in captured.out
+    assert "[sae-word-sets:render]" in captured.out
     assert "[sae-word-sets:summarize]" in captured.out
     assert "Layer 0 cosine similarity matrix" in captured.out
     assert "red" in captured.out
@@ -263,3 +273,33 @@ def test_run_word_set_sae_feature_experiment_marks_failed_heartbeat(
     assert heartbeat_status["error_type"] == "RuntimeError"
     heartbeat_events = _read_jsonl(output_dir / "heartbeat_events.jsonl")
     assert heartbeat_events[-1]["state"] == "failed"
+
+
+def test_render_word_set_sae_heatmaps_renders_existing_run(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _install_fake_components(monkeypatch)
+    monkeypatch.setattr(word_set_sae, "COMMON_COLOR_FAMILY_WORDS", ("red", "blue", "green"))
+    sae_repo = tmp_path / "fake_sae_repo"
+    _write_fake_sae_repo(sae_repo, layers=(0, 1))
+
+    output_dir = tmp_path / "out"
+    word_set_sae.run_word_set_sae_feature_experiment(
+        output_dir=output_dir,
+        model_name="fake-model",
+        sae_repo_id_or_path=str(sae_repo),
+        sae_layers=(0, 1),
+        batch_size=4,
+        encode_batch_size=8,
+        max_length=8,
+        device="cpu",
+    )
+
+    shutil.rmtree(output_dir / "heatmaps")
+    render_summary = word_set_sae.render_word_set_sae_heatmaps(run_dir=output_dir)
+
+    assert render_summary["heatmap_count"] == 2
+    assert render_summary["layers"] == [0, 1]
+    assert (output_dir / "heatmaps" / "index.html").exists()
+    assert (output_dir / "heatmaps" / "layer_01_cosine_heatmap.svg").exists()
