@@ -60,6 +60,7 @@ def test_direction_experiment_suite_builds_large_catalog_prompt_files(tmp_path: 
     assert manifest["suite_profile"] == "focused"
     assert len(manifest["prompt_sets"]) == 8
     assert manifest["run_count"] == len(manifest["prompt_sets"]) * 2
+    assert any("--alpha-values=-2,0,2" in row["command"] for row in manifest["runs"])
     assert (tmp_path / "suite" / "run_suite.sh").exists()
 
 
