@@ -125,6 +125,10 @@ def _write_report(path: Path, *, model_name: str, layers: tuple[int, ...], words
         "",
         "Per-layer artifacts:",
         "",
+        "- `manifest.json`",
+        "- `heartbeat_status.json`",
+        "- `heartbeat_events.jsonl`",
+        "- `panel.jsonl`",
         "- `layer_XX/residual_vectors.npy`",
         "- `layer_XX/feature_vectors.npy`",
         "- `layer_XX/mean_feature_vector.npy`",
@@ -151,7 +155,11 @@ def _write_final_results(output_dir: Path, *, summary: dict[str, Any]) -> None:
     payload = {
         "kind": "sae_color_family_feature_matrix",
         "key_artifacts": {
+            "heartbeat_events": "heartbeat_events.jsonl",
+            "heartbeat_status": "heartbeat_status.json",
             "layer_summary": "layer_summary.jsonl",
+            "manifest": "manifest.json",
+            "panel": "panel.jsonl",
             "report": "report.md",
             "summary": "summary.json",
         },
@@ -176,80 +184,124 @@ def run_word_set_sae_feature_experiment(
     np, torch, _ = _require_geometry_stack()
     output_dir.mkdir(parents=True, exist_ok=True)
     heartbeat = HeartbeatRecorder(output_dir, label="sae-word-sets")
-    words = tuple(str(word) for word in COMMON_COLOR_FAMILY_WORDS)
-    layers = tuple(int(layer) for layer in sae_layers)
-    prompt_rows = _build_prompt_rows(words)
-    heartbeat.write_manifest(
-        command="sae-word-sets",
-        model_name=model_name,
-        sae_layers=list(layers),
-        sae_repo_id_or_path=sae_repo_id_or_path,
-        word_count=len(words),
-        words=list(words),
-    )
-    runtime_device = _resolve_device(torch, device)
-    activations_by_layer, enriched_rows = _capture_last_token_activations(
-        model_name=model_name,
-        records=prompt_rows,
-        layers=layers,
-        max_length=max_length,
-        batch_size=batch_size,
-        device=device,
-        heartbeat=heartbeat,
-    )
-    _write_jsonl(output_dir / "panel.jsonl", enriched_rows)
-
-    layer_summaries: list[dict[str, Any]] = []
-    for layer in layers:
+    phase = "setup"
+    try:
+        words = tuple(str(word) for word in COMMON_COLOR_FAMILY_WORDS)
+        layers = tuple(int(layer) for layer in sae_layers)
+        if len(words) < 2:
+            raise ValueError("Need at least two common color-family words to build leave-one-out contrasts.")
+        prompt_rows = _build_prompt_rows(words)
+        heartbeat.write_manifest(
+            command="sae-word-sets",
+            model_name=model_name,
+            sae_layers=list(layers),
+            sae_repo_id_or_path=sae_repo_id_or_path,
+            word_count=len(words),
+            words=list(words),
+        )
         heartbeat.update(
-            phase="analyze",
-            message=f"Encoding common color-family words at layer {layer}",
-            current_layer=layer,
+            phase=phase,
+            message="Preparing SAE word-set color matrix run",
+            layer_count=len(layers),
+            word_count=len(words),
         )
-        sae, _sae_config = load_off_the_shelf_sae(
-            layer=layer,
-            repo_id_or_path=sae_repo_id_or_path,
-            trainer_index=trainer_index,
-            device=str(runtime_device),
-            cache_dir=cache_dir,
-        )
-        feature_vectors = _encode_activations(
-            torch=torch,
-            sae=sae,
-            activations=activations_by_layer[layer],
-            batch_size=encode_batch_size,
-            device=str(runtime_device),
-        )
-        layer_summary = _write_layer_outputs(
-            np=np,
-            layer_dir=output_dir / f"layer_{layer:02d}",
-            words=words,
-            rows=enriched_rows,
-            residual_vectors=activations_by_layer[layer],
-            feature_vectors=feature_vectors,
-        )
-        layer_summaries.append(layer_summary)
+        runtime_device = _resolve_device(torch, device)
 
-    layer_summaries.sort(key=lambda row: int(row["layer"]))
-    _write_jsonl(output_dir / "layer_summary.jsonl", layer_summaries)
-    summary = {
-        "layers": list(layers),
-        "model_name": model_name,
-        "sae_repo_id_or_path": sae_repo_id_or_path,
-        "trainer_index": trainer_index,
-        "word_count": len(words),
-        "words": list(words),
-    }
-    _write_json(output_dir / "summary.json", summary)
-    _write_report(output_dir / "report.md", model_name=model_name, layers=layers, words=words)
-    _write_final_results(output_dir, summary=summary)
-    matrix_sections = []
-    for layer in layers:
-        matrix = np.load(output_dir / f"layer_{layer:02d}" / "cosine_similarity_matrix.npy").astype(np.float32)
-        matrix_sections.append(_format_labeled_similarity_matrix(layer=layer, words=words, matrix=matrix))
-    print("\n\n".join(matrix_sections), flush=True)
-    heartbeat.update(phase="complete", message="SAE color-family matrix run complete", state="completed")
-    return summary
+        phase = "collect"
+        heartbeat.update(
+            phase=phase,
+            message="Collecting residual activations for common color-family words",
+            layer_count=len(layers),
+            total_records=len(prompt_rows),
+        )
+        activations_by_layer, enriched_rows = _capture_last_token_activations(
+            model_name=model_name,
+            records=prompt_rows,
+            layers=layers,
+            max_length=max_length,
+            batch_size=batch_size,
+            device=device,
+            heartbeat=heartbeat,
+        )
+        _write_jsonl(output_dir / "panel.jsonl", enriched_rows)
+        heartbeat.update(
+            phase=phase,
+            message="Collected residual activations for common color-family words",
+            layer_count=len(layers),
+            processed_records=len(enriched_rows),
+            total_records=len(enriched_rows),
+        )
+
+        layer_summaries: list[dict[str, Any]] = []
+        for layer in layers:
+            phase = "analyze"
+            heartbeat.update(
+                phase=phase,
+                message=f"Loading SAE for layer {layer}",
+                current_layer=layer,
+            )
+            sae, _sae_config = load_off_the_shelf_sae(
+                layer=layer,
+                repo_id_or_path=sae_repo_id_or_path,
+                trainer_index=trainer_index,
+                device=str(runtime_device),
+                cache_dir=cache_dir,
+            )
+            phase = "encode"
+            heartbeat.update(
+                phase=phase,
+                message=f"Encoding SAE feature vectors at layer {layer}",
+                current_layer=layer,
+                activation_count=int(activations_by_layer[layer].shape[0]),
+            )
+            feature_vectors = _encode_activations(
+                torch=torch,
+                sae=sae,
+                activations=activations_by_layer[layer],
+                batch_size=encode_batch_size,
+                device=str(runtime_device),
+            )
+            phase = "summarize"
+            layer_summary = _write_layer_outputs(
+                np=np,
+                layer_dir=output_dir / f"layer_{layer:02d}",
+                words=words,
+                rows=enriched_rows,
+                residual_vectors=activations_by_layer[layer],
+                feature_vectors=feature_vectors,
+            )
+            layer_summaries.append(layer_summary)
+            heartbeat.update(
+                phase=phase,
+                message=f"Wrote cosine similarity outputs for layer {layer}",
+                current_layer=layer,
+                feature_count=int(feature_vectors.shape[1]),
+                mean_abs_offdiag_cosine=float(layer_summary["mean_abs_offdiag_cosine"]),
+            )
+
+        layer_summaries.sort(key=lambda row: int(row["layer"]))
+        _write_jsonl(output_dir / "layer_summary.jsonl", layer_summaries)
+        summary = {
+            "layers": list(layers),
+            "model_name": model_name,
+            "sae_repo_id_or_path": sae_repo_id_or_path,
+            "trainer_index": trainer_index,
+            "word_count": len(words),
+            "words": list(words),
+        }
+        _write_json(output_dir / "summary.json", summary)
+        _write_report(output_dir / "report.md", model_name=model_name, layers=layers, words=words)
+        _write_final_results(output_dir, summary=summary)
+        matrix_sections = []
+        for layer in layers:
+            matrix = np.load(output_dir / f"layer_{layer:02d}" / "cosine_similarity_matrix.npy").astype(np.float32)
+            matrix_sections.append(_format_labeled_similarity_matrix(layer=layer, words=words, matrix=matrix))
+        print("\n\n".join(matrix_sections), flush=True)
+        heartbeat.update(phase="complete", message="SAE color-family matrix run complete", state="completed")
+        return summary
+    except Exception as error:
+        heartbeat.fail(phase=phase, error=error)
+        raise
 
 
 __all__ = [

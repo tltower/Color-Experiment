@@ -131,6 +131,15 @@ def _write_fake_sae_repo(root: Path, *, layers: tuple[int, ...]) -> None:
         )
 
 
+def _read_jsonl(path: Path) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped:
+            rows.append(json.loads(stripped))
+    return rows
+
+
 def test_leave_one_out_feature_vectors_matches_expected() -> None:
     values = np.array(
         [
@@ -192,8 +201,65 @@ def test_run_word_set_sae_feature_experiment_writes_cosine_matrices(
     assert matrix_payload["words"] == ["red", "blue", "green"]
     assert len(matrix_payload["matrix"]) == 3
     assert (output_dir / "layer_01" / "cosine_similarity_matrix.json").exists()
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["label"] == "sae-word-sets"
+    assert manifest["word_count"] == 3
+    heartbeat_status = json.loads((output_dir / "heartbeat_status.json").read_text(encoding="utf-8"))
+    assert heartbeat_status["state"] == "completed"
+    assert heartbeat_status["phase"] == "complete"
+    heartbeat_events = _read_jsonl(output_dir / "heartbeat_events.jsonl")
+    assert any(event["phase"] == "collect" for event in heartbeat_events)
+    assert any(event["phase"] == "encode" for event in heartbeat_events)
+    assert any(event["phase"] == "summarize" for event in heartbeat_events)
+    final_results = json.loads((output_dir / "final_results.json").read_text(encoding="utf-8"))
+    assert final_results["key_artifacts"]["heartbeat_status"] == "heartbeat_status.json"
+    assert final_results["key_artifacts"]["heartbeat_events"] == "heartbeat_events.jsonl"
+    report_text = (output_dir / "report.md").read_text(encoding="utf-8")
+    assert "heartbeat_status.json" in report_text
+    assert "heartbeat_events.jsonl" in report_text
     captured = capsys.readouterr()
+    assert "[sae-word-sets:collect]" in captured.out
+    assert "[sae-word-sets:summarize]" in captured.out
     assert "Layer 0 cosine similarity matrix" in captured.out
     assert "red" in captured.out
     assert "blue" in captured.out
     assert "green" in captured.out
+
+
+def test_run_word_set_sae_feature_experiment_marks_failed_heartbeat(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _install_fake_components(monkeypatch)
+    monkeypatch.setattr(word_set_sae, "COMMON_COLOR_FAMILY_WORDS", ("red", "blue", "green"))
+    sae_repo = tmp_path / "fake_sae_repo"
+    _write_fake_sae_repo(sae_repo, layers=(0,))
+
+    def _boom(**_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(word_set_sae, "_encode_activations", _boom)
+
+    output_dir = tmp_path / "out"
+    try:
+        word_set_sae.run_word_set_sae_feature_experiment(
+            output_dir=output_dir,
+            model_name="fake-model",
+            sae_repo_id_or_path=str(sae_repo),
+            sae_layers=(0,),
+            batch_size=4,
+            encode_batch_size=8,
+            max_length=8,
+            device="cpu",
+        )
+    except RuntimeError as error:
+        assert str(error) == "boom"
+    else:
+        raise AssertionError("Expected RuntimeError from patched _encode_activations.")
+
+    heartbeat_status = json.loads((output_dir / "heartbeat_status.json").read_text(encoding="utf-8"))
+    assert heartbeat_status["state"] == "failed"
+    assert heartbeat_status["phase"] == "encode"
+    assert heartbeat_status["error_type"] == "RuntimeError"
+    heartbeat_events = _read_jsonl(output_dir / "heartbeat_events.jsonl")
+    assert heartbeat_events[-1]["state"] == "failed"
