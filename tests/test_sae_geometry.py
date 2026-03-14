@@ -579,6 +579,17 @@ def test_sae_intervene_can_run_in_description_mode(tmp_path: Path, monkeypatch) 
     assert all(row["output_format"] == "description" for row in rows)
 
 
+def test_blank_hex_intervention_prompt_is_parseable() -> None:
+    rows = sae_geometry._intervention_prompts(prompt_mode="blank_hex", prompt_file=None)
+
+    assert rows == [
+        {
+            "prompt_id": "blank-hex",
+            "prompt": "Return one representative color as a hex code. Reply only with a hex code like #ff0000.",
+        }
+    ]
+
+
 def test_run_color_sae_geometry_uses_torch_pca_lowrank(
     tmp_path: Path,
     monkeypatch,

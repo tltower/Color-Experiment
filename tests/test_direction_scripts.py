@@ -53,9 +53,15 @@ def test_direction_experiment_suite_builds_large_catalog_prompt_files(tmp_path: 
     hex_lines = (prompt_root / "describe_catalog_hex_general.txt").read_text(encoding="utf-8").splitlines()
     rgb_lines = (prompt_root / "catalog_word_to_rgb.txt").read_text(encoding="utf-8").splitlines()
     generation_lines = (prompt_root / "catalog_word_to_hex.txt").read_text(encoding="utf-8").splitlines()
+    word_lines = (prompt_root / "catalog_hex_to_word.txt").read_text(encoding="utf-8").splitlines()
     assert len(hex_lines) == 20
     assert len(rgb_lines) == 20
     assert len(generation_lines) == 20
+    assert len(word_lines) == 20
+    assert "exactly three adjectives separated by commas" in hex_lines[0]
+    assert "Reply only with a value like 255,0,0." in rgb_lines[0]
+    assert "Reply only with a value like #ff0000." in generation_lines[0]
+    assert "Return only one color word" in word_lines[0]
     assert manifest["catalog_entry_count"] == 20
     assert manifest["suite_profile"] == "focused"
     assert len(manifest["prompt_sets"]) == 8

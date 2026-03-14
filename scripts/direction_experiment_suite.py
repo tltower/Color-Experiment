@@ -129,7 +129,10 @@ def _prompt_specs_for_profile(
                 prompt_count=len(catalog_entries),
                 category="generation",
             ),
-            [f"Hex code for: {row['word']}" for row in catalog_entries],
+            [
+                f"Return only a hex code for the color {row['word']}. Reply only with a value like #ff0000."
+                for row in catalog_entries
+            ],
         ),
         (
             PromptSet(
@@ -139,7 +142,10 @@ def _prompt_specs_for_profile(
                 prompt_count=len(catalog_entries),
                 category="generation",
             ),
-            [f"RGB triplet for: {row['word']}" for row in catalog_entries],
+            [
+                f"Return only an RGB triplet for the color {row['word']}. Reply only with a value like 255,0,0."
+                for row in catalog_entries
+            ],
         ),
         (
             PromptSet(
@@ -149,7 +155,10 @@ def _prompt_specs_for_profile(
                 prompt_count=len(catalog_entries),
                 category="generation",
             ),
-            [f"Color word for: {row['hex']}" for row in catalog_entries],
+            [
+                f"Return only one color word for the color {row['hex']}. No other text."
+                for row in catalog_entries
+            ],
         ),
         (
             PromptSet(
@@ -159,7 +168,7 @@ def _prompt_specs_for_profile(
                 prompt_count=len(core_entries),
             ),
             [
-                f"Describe the appearance of the color {row['word']} in three adjectives. Do not name objects."
+                f"Describe the appearance of the color {row['word']} in exactly three adjectives separated by commas. Do not name objects."
                 for row in core_entries
             ],
         ),
@@ -171,7 +180,7 @@ def _prompt_specs_for_profile(
                 prompt_count=len(core_entries),
             ),
             [
-                f"Describe the appearance of the color {row['hex']} in three adjectives. Do not name objects."
+                f"Describe the appearance of the color {row['hex']} in exactly three adjectives separated by commas. Do not name objects."
                 for row in core_entries
             ],
         ),
@@ -183,7 +192,7 @@ def _prompt_specs_for_profile(
                 prompt_count=len(core_entries),
             ),
             [
-                f"Describe the appearance of the color {row['rgb']} in three adjectives. Do not name objects."
+                f"Describe the appearance of the color {row['rgb']} in exactly three adjectives separated by commas. Do not name objects."
                 for row in core_entries
             ],
         ),
@@ -195,7 +204,7 @@ def _prompt_specs_for_profile(
                 prompt_count=len(catalog_entries),
             ),
             [
-                f"Describe the appearance of the color {row['word']} in three adjectives. Do not name objects."
+                f"Describe the appearance of the color {row['word']} in exactly three adjectives separated by commas. Do not name objects."
                 for row in catalog_entries
             ],
         ),
@@ -207,7 +216,7 @@ def _prompt_specs_for_profile(
                 prompt_count=len(catalog_entries),
             ),
             [
-                f"Describe the appearance of the color {row['hex']} in three adjectives. Do not name objects."
+                f"Describe the appearance of the color {row['hex']} in exactly three adjectives separated by commas. Do not name objects."
                 for row in catalog_entries
             ],
         ),
@@ -219,7 +228,7 @@ def _prompt_specs_for_profile(
                 prompt_count=len(catalog_entries),
             ),
             [
-                f"Describe the appearance of the color {row['rgb']} in three adjectives. Do not name objects."
+                f"Describe the appearance of the color {row['rgb']} in exactly three adjectives separated by commas. Do not name objects."
                 for row in catalog_entries
             ],
         ),
@@ -231,7 +240,7 @@ def _prompt_specs_for_profile(
                 prompt_count=len(catalog_entries),
             ),
             [
-                f"Describe the color {row['hex']} in terms of finish, vividness, and mood using three adjectives."
+                f"Describe the color {row['hex']} in terms of finish, vividness, and mood using exactly three adjectives separated by commas."
                 for row in catalog_entries
             ],
         ),
@@ -243,7 +252,7 @@ def _prompt_specs_for_profile(
                 prompt_count=len(semantic_words),
             ),
             [
-                f"Describe the color of the following word in three adjectives: {word}"
+                f"Describe the color of the following word in exactly three adjectives separated by commas: {word}"
                 for word in semantic_words
             ],
         ),

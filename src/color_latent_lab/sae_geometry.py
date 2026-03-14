@@ -1322,7 +1322,12 @@ def _intervention_prompts(
             raise ValueError(f"No prompts loaded from {prompt_file}")
         return rows
     if prompt_mode == "blank_hex":
-        return [{"prompt_id": "blank-hex", "prompt": "Hex code for:"}]
+        return [
+            {
+                "prompt_id": "blank-hex",
+                "prompt": "Return one representative color as a hex code. Reply only with a hex code like #ff0000.",
+            }
+        ]
     if prompt_mode == "semantic_hex":
         return [
             {

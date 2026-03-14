@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from .color_palette import COLOR_WORD_SYNONYMS
 
 FORMAT_PROMPTS: dict[str, str] = {
-    "word": "What color do you associate with the word {word}? Reply with one color word.",
-    "hex": "What color do you associate with the word {word}? Reply with a hex code.",
-    "rgb": "What color do you associate with the word {word}? Reply with an RGB triplet like 255,0,0.",
+    "word": "What color do you associate with the word {word}? Reply only with one color word.",
+    "hex": "What color do you associate with the word {word}? Reply only with a hex code like #ff0000.",
+    "rgb": "What color do you associate with the word {word}? Reply only with an RGB triplet like 255,0,0.",
 }
 DEFAULT_FORMATS = ("word", "hex", "rgb")
 
